@@ -776,7 +776,7 @@ ch = cohort_headline
 BODY = f"""
 <div class="wrap">
 <header class="sticky">
-  <a href="index.html" style="display:inline-block;font-size:12px;color:#8a1f2b;text-decoration:none;font-weight:700;margin-bottom:4px">← CLIF ICU Ventilator QI Bundle</a>
+  <a href="05_scorecard.html" style="display:inline-block;font-size:12px;color:#8a1f2b;text-decoration:none;font-weight:700;margin-bottom:4px">← CLIF ICU Ventilator QI Bundle</a>
   <h1>Lung-Protective Ventilation Adherence — {SITE}</h1>
   <p class="sub" id="cohort-line">{ch['n_patient_days']:,} IMV-on-ICU patient-days · {ch['n_hosps']:,} hospitalizations · {ch['n_patients']:,} patients (all time)</p>
   <p class="sub" style="margin-top:1px">{ch['day_min']} → {ch['day_max']} · Descriptive; component-separated, each measure on its own denominator.</p>

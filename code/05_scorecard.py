@@ -1,7 +1,7 @@
 """
 05_scorecard.py — CLIF ICU Ventilator-QI bundle scorecard (landing page).
 
-Builds output/index.html: a glanceable, per-unit / per-ISO-week scorecard of ventilator
+Builds output/05_scorecard.html: a glanceable, per-unit / per-ISO-week scorecard of ventilator
 QI bundle metrics. LPV is the first REAL tile (links to the detailed dashboard,
 04_lpv_dashboard.html); SAT / SBT / ARDS proning / mobilization are styled placeholders
 for the rest of the ICU-liberation bundle.
@@ -11,7 +11,7 @@ with a 3-segment mini-indicator: Plateau <= 30 · Driving pressure <= 15 · Vt <
 SEVERE respiratory failure. Lightweight (inline SVG donut + sparkline, no Plotly).
 
 Inputs:  output/02_patient_day_status.parquet, 02_intervals.parquet, 02d_severity.parquet
-Output:  output/index.html
+Output:  output/05_scorecard.html
 
 Run:
     .venv/bin/python code/05_scorecard.py
@@ -164,7 +164,7 @@ def _load_tile_img(stem, px=180):
 TILE_IMG = {k: _load_tile_img(v) for k, v in _IMG_FILE.items()}
 print(f"[img] tile illustrations embedded: {sum(1 for v in TILE_IMG.values() if v)}/{len(TILE_IMG)}")
 
-print("[3] Writing index.html ...")
+print("[3] Writing 05_scorecard.html ...")
 latest = weeks[-1]
 week_opts = "".join(f'<option value="{w}">{html.escape(week_label[w])}</option>' for w in reversed(weeks))
 month_opts = "".join(f'<option value="{m}">{html.escape(month_label[m])}</option>' for m in reversed(months))
@@ -191,12 +191,13 @@ border-radius:999px;padding:6px 12px;font-size:13px;box-shadow:0 1px 2px rgba(12
 @media(max-width:1200px){.grid{grid-template-columns:repeat(2,1fr)}}
 .card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:20px 18px;
 box-shadow:0 3px 10px rgba(120,30,40,.06);display:flex;flex-direction:column;align-items:center;text-align:center;
-min-height:330px;position:relative;}
+min-height:370px;position:relative;}
 .card.lpv{border-color:#e7c9cd;}
 .card.ph{opacity:.62;}
 .card .ico{width:40px;height:40px;color:var(--maroon);margin-bottom:6px;}
-.card img.ico{width:78px;height:78px;object-fit:contain;margin-bottom:2px;}
-.card .mname{font-weight:800;font-size:15px;color:var(--maroon-d);letter-spacing:.3px;}
+/* All tile illustrations the same size, above the title. */
+.card img.ico{width:108px;height:108px;object-fit:contain;margin:2px 0 6px;}
+.card .mname{font-weight:800;font-size:18px;color:var(--maroon-d);letter-spacing:.3px;}
 .card .msub{font-size:11.5px;color:var(--muted);margin:1px 0 10px;min-height:15px;}
 .donut{position:relative;width:128px;height:128px;margin:2px 0 6px;}
 .donut .val{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;}
@@ -365,7 +366,7 @@ HTML = (HTML.replace("@@CSS@@", CSS)
         .replace("@@PAYLOAD@@", json.dumps(payload, allow_nan=False))
         .replace("@@JS@@", APP_JS))
 
-out_path = OUT_DIR / "index.html"
+out_path = OUT_DIR / "05_scorecard.html"
 out_path.write_text(HTML)
 print(f"  wrote {out_path}  ({out_path.stat().st_size/1e3:.0f} KB)")
 
