@@ -60,19 +60,31 @@ status = pd.read_parquet(OUT_DIR / "02_patient_day_status.parquet")
 status["calendar_day"] = pd.to_datetime(status["calendar_day"])
 status["month"] = status["calendar_day"].dt.strftime("%Y-%m")
 status["calendar_day"] = status["calendar_day"].dt.date
-print(f"  cohort patient-days: {len(status):,}")
+status["hospitalization_id"] = status["hospitalization_id"].astype(str)
+
+# Severity stratifier (severe respiratory failure) — join per (hosp, day).
+SEVS = ["severe", "not_severe", "unknown"]
+sev = pd.read_parquet(OUT_DIR / "02d_severity.parquet")[["hospitalization_id", "calendar_day", "severity"]]
+sev["hospitalization_id"] = sev["hospitalization_id"].astype(str)
+sev["calendar_day"] = pd.to_datetime(sev["calendar_day"]).dt.date
+status = status.merge(sev, on=["hospitalization_id", "calendar_day"], how="left")
+status["severity"] = status["severity"].fillna("unknown")
+print(f"  cohort patient-days: {len(status):,}  | severity: "
+      + ", ".join(f"{k} {int(v):,}" for k, v in status['severity'].value_counts().items()))
 
 
 # ----------------------------------------------------------------------------
 # A. Per-measure summaries (outputs 1, 2) from the status table
 # ----------------------------------------------------------------------------
 
-def summarize(bucket_col: str) -> pd.DataFrame:
-    """Long per-measure summary for one time bucket, incl. __ALL__ pooled rows."""
+def summarize(bucket_col: str, by_severity: bool = False) -> pd.DataFrame:
+    """Long per-measure summary for one time bucket, incl. __ALL__ pooled rows.
+    When by_severity, adds a `severity` group key (strata; dashboard derives 'All' = sum)."""
+    extra = ["severity"] if by_severity else []
     frames = []
     for m in MEASURES:
-        st = status[[bucket_col, "assigned_unit", f"{m}_status"]].rename(columns={f"{m}_status": "status"})
-        for unit_keys, tag in [([bucket_col, "assigned_unit"], None), ([bucket_col], ALL)]:
+        st = status[[bucket_col, "assigned_unit", f"{m}_status"] + extra].rename(columns={f"{m}_status": "status"})
+        for unit_keys, tag in [([bucket_col, "assigned_unit"] + extra, None), ([bucket_col] + extra, ALL)]:
             counts = (st.groupby(unit_keys)["status"].value_counts().unstack(fill_value=0)
                       .reindex(columns=STATUSES, fill_value=0).reset_index())
             if tag is not None:
@@ -84,14 +96,14 @@ def summarize(bucket_col: str) -> pd.DataFrame:
                               "not_assessable": "n_not_assessable"})
     out["n_total"] = out["n_adherent"] + out["n_non_adherent"] + out["n_not_assessable"]
     out = add_rates(out)
-    cols = [bucket_col, "assigned_unit", "measure", "n_total",
-            "n_adherent", "n_non_adherent", "n_not_assessable", "assessable_rate", "crude_rate"]
-    return out[cols].sort_values([bucket_col, "assigned_unit", "measure"]).reset_index(drop=True)
+    cols = ([bucket_col, "assigned_unit"] + extra + ["measure", "n_total",
+            "n_adherent", "n_non_adherent", "n_not_assessable", "assessable_rate", "crude_rate"])
+    return out[cols].sort_values([bucket_col, "assigned_unit"] + extra + ["measure"]).reset_index(drop=True)
 
 
-print("[A] Per-measure summaries (day, month) ...")
-daily = summarize("calendar_day")
-monthly = summarize("month")
+print("[A] Per-measure summaries (day all-severity, month severity-stratified) ...")
+daily = summarize("calendar_day")                      # all-severity (daily drill-down)
+monthly = summarize("month", by_severity=True)         # severity-stratified
 daily.to_parquet(OUT_DIR / "03_daily_unit_summary.parquet", index=False)
 monthly.to_parquet(OUT_DIR / "03_monthly_unit_summary.parquet", index=False)
 print(f"  wrote 03_daily_unit_summary.parquet  ({len(daily):,} rows)")
@@ -117,7 +129,7 @@ vt_assess = dur.where(vt_present, 0.0).groupby(gk).sum()
 comp_assess = dur.where(comp_present, 0.0).groupby(gk).sum()
 
 # Spine: every cohort patient-day with its unit + buckets (n_total denominator lives here).
-spine = status[["hospitalization_id", "calendar_day", "assigned_unit", "month"]].copy()
+spine = status[["hospitalization_id", "calendar_day", "assigned_unit", "month", "severity"]].copy()
 
 # Per-(hosp,day) assessable booleans are cutoff-independent.
 day_idx = spine.set_index(key)
@@ -128,23 +140,30 @@ vt_assess_al = vt_assess.reindex(day_idx.index)
 comp_assess_al = comp_assess.reindex(day_idx.index)
 
 
-def grid_counts(bucket_col: str, pooled_only: bool) -> pd.DataFrame:
+def grid_counts(bucket_col: str, pooled_only: bool, by_severity: bool = False) -> pd.DataFrame:
     rows = []
+    sev_key = ["severity"] if by_severity else []
     for c in VT_GRID:
         vt_in = dur.where(vt_present & (iv["vt_per_pbw"] <= c), 0.0).groupby(gk).sum().reindex(day_idx.index).fillna(0.0)
         comp_in = dur.where(comp_present & fixed_ok & (iv["vt_per_pbw"] <= c), 0.0).groupby(gk).sum().reindex(day_idx.index).fillna(0.0)
         frac_vt = np.where(vt_assess_al > 0, vt_in / vt_assess_al.where(vt_assess_al > 0), np.nan)
         frac_comp = np.where(comp_assess_al > 0, comp_in / comp_assess_al.where(comp_assess_al > 0), np.nan)
-        df = pd.DataFrame({
+        cols_d = {
             "bucket": day_idx[bucket_col].values,
             "assigned_unit": day_idx["assigned_unit"].values,
             "vt_assessable": day_idx["vt_assessable"].values,
             "comp_assessable": day_idx["comp_assessable"].values,
             "vt_adher": day_idx["vt_assessable"].values & (pd.Series(frac_vt).values >= ADHERENCE_FRACTION),
             "comp_adher": day_idx["comp_assessable"].values & (pd.Series(frac_comp).values >= ADHERENCE_FRACTION),
-        })
+        }
+        if by_severity:
+            cols_d["severity"] = day_idx["severity"].values
+        df = pd.DataFrame(cols_d)
         for measure, ass_col, adh_col in [("vt", "vt_assessable", "vt_adher"), ("comp", "comp_assessable", "comp_adher")]:
-            group_sets = [(["bucket"], ALL)] if pooled_only else [(["bucket", "assigned_unit"], None), (["bucket"], ALL)]
+            if pooled_only:
+                group_sets = [(["bucket"] + sev_key, ALL)]
+            else:
+                group_sets = [(["bucket", "assigned_unit"] + sev_key, None), (["bucket"] + sev_key, ALL)]
             for gcols, tag in group_sets:
                 agg = df.groupby(gcols).agg(n_total=(ass_col, "size"),
                                             n_assessable=(ass_col, "sum"),
@@ -158,12 +177,12 @@ def grid_counts(bucket_col: str, pooled_only: bool) -> pd.DataFrame:
     out["assessable_rate"] = np.where(out["n_assessable"] > 0, out["n_adherent"] / out["n_assessable"].where(out["n_assessable"] > 0), np.nan)
     out["crude_rate"] = np.where(out["n_total"] > 0, out["n_adherent"] / out["n_total"].where(out["n_total"] > 0), np.nan)
     out = out.rename(columns={"bucket": bucket_col})
-    cols = [bucket_col, "assigned_unit", "vt_cutoff", "measure", "n_total", "n_assessable", "n_adherent", "assessable_rate", "crude_rate"]
-    return out[cols].sort_values([bucket_col, "assigned_unit", "measure", "vt_cutoff"]).reset_index(drop=True)
+    cols = [bucket_col, "assigned_unit"] + sev_key + ["vt_cutoff", "measure", "n_total", "n_assessable", "n_adherent", "assessable_rate", "crude_rate"]
+    return out[cols].sort_values([bucket_col, "assigned_unit"] + sev_key + ["measure", "vt_cutoff"]).reset_index(drop=True)
 
 
-grid_monthly = grid_counts("month", pooled_only=False)
-grid_daily = grid_counts("calendar_day", pooled_only=True)
+grid_monthly = grid_counts("month", pooled_only=False, by_severity=True)
+grid_daily = grid_counts("calendar_day", pooled_only=True)   # all-severity (daily drill-down)
 grid_monthly.to_parquet(OUT_DIR / "03_vt_grid_monthly.parquet", index=False)
 grid_daily.to_parquet(OUT_DIR / "03_vt_grid_daily_allunits.parquet", index=False)
 print(f"  wrote 03_vt_grid_monthly.parquet       ({len(grid_monthly):,} rows)")
@@ -174,21 +193,23 @@ print(f"  wrote 03_vt_grid_daily_allunits.parquet ({len(grid_daily):,} rows)")
 # Verification + summary
 # ----------------------------------------------------------------------------
 
-print("\n[verify] Cross-checks:")
+print("\n[verify] Cross-checks (monthly is severity-stratified → sum severity out):")
 
-# (2) Grid at c=6 == default summaries for vt & comp (monthly, per unit incl __ALL__)
-def default_rows(summary, measure):
-    s = summary[summary["measure"] == measure][["month", "assigned_unit", "n_adherent"]]
-    return s.set_index(["month", "assigned_unit"])["n_adherent"]
+
+def collapse(df, keys, col="n_adherent"):
+    return df.groupby(keys)[col].sum()
+
+
+# (2) Grid at c=6 == default summaries for vt & comp (sum over severity)
 g6 = grid_monthly[grid_monthly["vt_cutoff"] == 6.0]
 ok_grid = True
 for m in ("vt", "comp"):
-    a = default_rows(monthly, m)
-    b = g6[g6["measure"] == m].set_index(["month", "assigned_unit"])["n_adherent"]
+    a = collapse(monthly[monthly["measure"] == m], ["month", "assigned_unit"])
+    b = collapse(g6[g6["measure"] == m], ["month", "assigned_unit"])
     ok_grid &= bool(a.reindex(b.index).fillna(0).astype(int).equals(b.astype(int)))
 print(f"  grid(c=6) n_adherent == default summary (vt, comp): {ok_grid}")
 
-# (3) Reconcile overall __ALL__ to 02_features
+# (3) Reconcile overall __ALL__ to 02_features (sums over months × severity)
 feat = json.loads((OUT_DIR / "02_features_summary.json").read_text())["per_measure"]
 recon = {}
 for m in MEASURES:
@@ -199,29 +220,36 @@ for m in MEASURES:
                 "match": abs(ar - feat[m]["assessable_rate"]) < 1e-9}
     print(f"  {m:>5}: assessable_rate {ar*100:.2f}%  (02_features {feat[m]['assessable_rate']*100:.2f}%)  match={recon[m]['match']}")
 
-# (4) Pooled __ALL__ == sum over units (monthly default, per measure)
-per_unit = monthly[monthly["assigned_unit"] != ALL].groupby(["month", "measure"])["n_adherent"].sum()
-pooled = monthly[monthly["assigned_unit"] == ALL].set_index(["month", "measure"])["n_adherent"]
+# (4) Pooled __ALL__ == sum over units (sum over severity)
+per_unit = collapse(monthly[monthly["assigned_unit"] != ALL], ["month", "measure"])
+pooled = collapse(monthly[monthly["assigned_unit"] == ALL], ["month", "measure"])
 ok_pool = bool(per_unit.reindex(pooled.index).fillna(0).astype(int).equals(pooled.astype(int)))
 print(f"  pooled __ALL__ == sum over units: {ok_pool}")
 
-# (5) Internal: counts sum to total; daily->month consistency
+# (5) Internal: daily counts sum to total; daily(all-sev)->monthly(sum-sev) consistency
 ok_counts = bool((daily["n_total"] == daily[["n_adherent", "n_non_adherent", "n_not_assessable"]].sum(axis=1)).all())
 day2mo = (daily[daily["assigned_unit"] != ALL].assign(month=pd.to_datetime(daily["calendar_day"]).dt.strftime("%Y-%m"))
           .groupby(["month", "assigned_unit", "measure"])["n_adherent"].sum())
-mo_chk = monthly[monthly["assigned_unit"] != ALL].set_index(["month", "assigned_unit", "measure"])["n_adherent"]
+mo_chk = collapse(monthly[monthly["assigned_unit"] != ALL], ["month", "assigned_unit", "measure"])
 ok_day2mo = bool(day2mo.reindex(mo_chk.index).fillna(0).astype(int).equals(mo_chk.astype(int)))
 print(f"  counts sum to n_total: {ok_counts}  |  daily->monthly consistent: {ok_day2mo}")
+
+# (6) Severity strata complete: __ALL__ vt n_total over months × severity == cohort patient-days
+strata_total = int(monthly[(monthly["assigned_unit"] == ALL) & (monthly["measure"] == "vt")]["n_total"].sum())
+ok_strata = (strata_total == len(status))
+print(f"  severity strata sum to cohort ({strata_total:,} == {len(status):,}): {ok_strata}")
 
 summary = {
     "generated_at": datetime.now().isoformat(timespec="seconds"),
     "params": {"adherence_fraction": ADHERENCE_FRACTION, "min_assessable_min": MIN_ASSESSABLE_MIN,
-               "plateau_max": PLATEAU_MAX, "dp_max": DP_MAX, "vt_default": VT_DEFAULT, "vt_grid": VT_GRID},
+               "plateau_max": PLATEAU_MAX, "dp_max": DP_MAX, "vt_default": VT_DEFAULT, "vt_grid": VT_GRID,
+               "severity_strata": SEVS},
     "rows": {"daily": len(daily), "monthly": len(monthly),
              "vt_grid_monthly": len(grid_monthly), "vt_grid_daily_allunits": len(grid_daily)},
     "overall_assessable_rate_default": {m: recon[m]["assessable_rate"] for m in MEASURES},
     "checks": {"grid_eq_default": ok_grid, "reconcile_02features": all(recon[m]["match"] for m in MEASURES),
-               "pooled_eq_sum_units": ok_pool, "counts_sum_total": ok_counts, "daily_to_monthly": ok_day2mo},
+               "pooled_eq_sum_units": ok_pool, "counts_sum_total": ok_counts, "daily_to_monthly": ok_day2mo,
+               "severity_strata_complete": ok_strata},
 }
 (OUT_DIR / "03_aggregate_summary.json").write_text(json.dumps(summary, indent=2, default=str))
 print(f"\nWrote {OUT_DIR / '03_aggregate_summary.json'}")

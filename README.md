@@ -50,10 +50,18 @@ CLIF 2.x, all as the `filetype` in `config.json` (default `parquet`):
 | `hospitalization` | admission timing, age at admit |
 | `adt` | ICU location windows (`location_category == 'icu'`, `location_type`) |
 | `respiratory_support` | `device_category == 'IMV'`, `mode_category`, `tidal_volume_obs/set`, `plateau_pressure_obs`, `peep_obs/set`, `fio2_set` |
-| `vitals` | `vital_category == 'height_cm'` (for PBW) |
+| `vitals` | `vital_category == 'height_cm'` (PBW); `vital_category == 'spo2'` (severity S/F surrogate) |
+| `labs` | `lab_category == 'po2_arterial'` (severity P/F ratio) |
 
 Standard CLIF mCIDE category values are assumed (e.g. `device_category` `IMV`, the volume/pressure
-modes in `mode_category`). Outlier handling uses clifpy's built-in ranges.
+modes in `mode_category`, `po2_arterial`, `spo2`). Outlier handling uses clifpy's built-in ranges.
+
+### Severity stratifier
+
+The dashboard includes a **Severity filter** ("severe respiratory failure" = P/F < 300, or the S/F surrogate
+< 315 at SpO₂ ≤ 97%, **and** PEEP > 5; FiO₂/PEEP paired within a 4-hour lookback; worst oxygenation of the day).
+This is **not** full Berlin ARDS. Thresholds are named constants in `code/02d_severity.py` and need `labs`
+(`po2_arterial`) + `vitals` (`spo2`).
 
 ---
 
@@ -95,13 +103,14 @@ open output/04_lpv_dashboard.html      # macOS  (Linux: xdg-open)
 
 ## Pipeline
 
-`run_pipeline.sh` runs four steps in order (each is idempotent and reads the previous step's output):
+`run_pipeline.sh` runs these steps in order (each is idempotent and reads the previous step's output):
 
 | Step | Script | Output |
 |---|---|---|
 | 1 | `code/01_cohort.py` | `01_cohort_patient_days.parquet` — adult IMV-on-ICU patient-day cohort + PBW |
 | 2 | `code/02_features.py` | `02_patient_day_status.parquet`, `02_intervals.parquet` — per-component adherence |
-| 3 | `code/03_aggregate.py` | `03_*_unit_summary.parquet`, `03_vt_grid_*.parquet` — (time × unit) rollups + Vt grid |
+| 2d | `code/02d_severity.py` | `02d_severity.parquet` — severe-respiratory-failure flag per patient-day |
+| 3 | `code/03_aggregate.py` | `03_*_unit_summary.parquet`, `03_vt_grid_*.parquet` — (time × unit, severity) rollups + Vt grid |
 | 4 | `code/04_dashboard.py` | **`04_lpv_dashboard.html`** — the dashboard |
 
 ### Recommended first: check your data

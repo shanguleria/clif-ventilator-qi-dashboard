@@ -128,6 +128,19 @@ iv = pd.read_parquet(OUT_DIR / "02_intervals.parquet")
 feat = json.loads((OUT_DIR / "02_features_summary.json").read_text())
 agg = json.loads((OUT_DIR / "03_aggregate_summary.json").read_text())
 
+# Severity stratifier (severe respiratory failure) — join onto status (Table 1) + intervals (histograms).
+SEVS = ["severe", "not_severe", "unknown"]
+_sev = pd.read_parquet(OUT_DIR / "02d_severity.parquet")[["hospitalization_id", "calendar_day", "severity"]]
+_sev["hospitalization_id"] = _sev["hospitalization_id"].astype(str)
+_sev["calendar_day"] = pd.to_datetime(_sev["calendar_day"]).dt.date
+for _df in (status, iv):
+    _df["hospitalization_id"] = _df["hospitalization_id"].astype(str)
+    _df["calendar_day"] = pd.to_datetime(_df["calendar_day"]).dt.date
+status = status.merge(_sev, on=["hospitalization_id", "calendar_day"], how="left")
+iv = iv.merge(_sev, on=["hospitalization_id", "calendar_day"], how="left")
+status["severity"] = status["severity"].fillna("unknown")
+iv["severity"] = iv["severity"].fillna("unknown")
+
 VT_GRID = [float(c) for c in agg["params"]["vt_grid"]]
 VT_DEFAULT = float(agg["params"]["vt_default"])
 PLATEAU_MAX = float(agg["params"]["plateau_max"])
@@ -163,29 +176,40 @@ def counts_array(sub: pd.DataFrame, col: str) -> list:
     return a
 
 
-# vt/comp: per unit, per cutoff — monthly counts (cutoff-dependent adherent; summable in JS)
-vtc = {}
+# vt/comp counts, split to keep severity tripling bounded (×~1, not ×3):
+#   tot[unit][sev]                  — cohort patient-days (same across measure & cutoff)
+#   ass[unit][measure][sev]         — assessable (cutoff-independent)
+#   ad[unit][measure][cutoff][sev]  — adherent (cutoff-dependent)
+tot, ass, ad = {}, {}, {}
 for u in units:
-    vtc[u] = {}
-    for c in VT_GRID:
-        ck = f"{c:.1f}"
-        vtc[u][ck] = {}
-        for m in ["vt", "comp"]:
-            sub = grid[(grid["assigned_unit"] == u) & (grid["vt_cutoff"] == c) & (grid["measure"] == m)]
-            vtc[u][ck][m] = {"ad": counts_array(sub, "n_adherent"),
-                             "ass": counts_array(sub, "n_assessable"),
-                             "tot": counts_array(sub, "n_total")}
+    g_u = grid[grid["assigned_unit"] == u]
+    tot[u], ass[u], ad[u] = {}, {}, {}
+    for s in SEVS:
+        tslice = g_u[(g_u["severity"] == s) & (g_u["measure"] == "vt") & (g_u["vt_cutoff"] == VT_DEFAULT)]
+        tot[u][s] = counts_array(tslice, "n_total")
+    for m in ["vt", "comp"]:
+        g_um = g_u[g_u["measure"] == m]
+        ass[u][m], ad[u][m] = {}, {}
+        for s in SEVS:
+            ass[u][m][s] = counts_array(g_um[(g_um["severity"] == s) & (g_um["vt_cutoff"] == VT_DEFAULT)], "n_assessable")
+        for c in VT_GRID:
+            ck = f"{c:.1f}"
+            g_umc = g_um[g_um["vt_cutoff"] == c]
+            ad[u][m][ck] = {s: counts_array(g_umc[g_umc["severity"] == s], "n_adherent") for s in SEVS}
 
-# plat/dp: per unit — monthly counts (cutoff-independent)
+# plat/dp: per unit, per severity — monthly counts (cutoff-independent)
 stc = {}
 for m in ["plat", "dp"]:
     stc[m] = {}
     for u in units:
-        sub = monthly[(monthly["assigned_unit"] == u) & (monthly["measure"] == m)].copy()
-        sub["ass"] = sub["n_adherent"] + sub["n_non_adherent"]
-        stc[m][u] = {"ad": counts_array(sub, "n_adherent"),
-                     "ass": counts_array(sub, "ass"),
-                     "tot": counts_array(sub, "n_total")}
+        g_um = monthly[(monthly["assigned_unit"] == u) & (monthly["measure"] == m)].copy()
+        g_um["ass"] = g_um["n_adherent"] + g_um["n_non_adherent"]
+        stc[m][u] = {}
+        for s in SEVS:
+            sub = g_um[g_um["severity"] == s]
+            stc[m][u][s] = {"ad": counts_array(sub, "n_adherent"),
+                            "ass": counts_array(sub, "ass"),
+                            "tot": counts_array(sub, "n_total")}
 
 # Daily site-wide counts (for zooming into a single month → daily granularity).
 daily_grid["d"] = pd.to_datetime(daily_grid["calendar_day"]).dt.strftime("%Y-%m-%d")
@@ -232,15 +256,19 @@ iv["month"] = pd.to_datetime(iv["calendar_day"]).dt.strftime("%Y-%m")
 histc = {}
 for col, spec in HIST_SPEC.items():
     edges = np.arange(spec["lo"], spec["hi"] + spec["step"], spec["step"])
+    nb = len(edges) - 1
     centers = ((edges[:-1] + edges[1:]) / 2).tolist()
-    counts = [[0.0] * (len(edges) - 1) for _ in range(n_m)]
-    sub_all = iv[iv[col].notna()]
-    for mo, g in sub_all.groupby("month"):
-        if mo not in midx:
-            continue
-        cnt, _ = np.histogram(g[col].clip(spec["lo"], spec["hi"] - 1e-9), bins=edges, weights=g["duration_min"])
-        counts[midx[mo]] = [round(float(x), 1) for x in cnt]
-    histc[col] = {"centers": centers, "title": spec["title"], "threshold": spec["thr"], "counts": counts}
+    by_sev = {}
+    for s in SEVS:
+        counts = [[0.0] * nb for _ in range(n_m)]
+        sub_s = iv[iv[col].notna() & (iv["severity"] == s)]
+        for mo, g in sub_s.groupby("month"):
+            if mo not in midx:
+                continue
+            cnt, _ = np.histogram(g[col].clip(spec["lo"], spec["hi"] - 1e-9), bins=edges, weights=g["duration_min"])
+            counts[midx[mo]] = [round(float(x), 1) for x in cnt]
+        by_sev[s] = counts
+    histc[col] = {"centers": centers, "title": spec["title"], "threshold": spec["thr"], "counts": by_sev}
 
 # ----------------------------------------------------------------------------
 # 4. Per-period Table 1 + headline counts (precomputed; no row-level data shipped)
@@ -282,31 +310,35 @@ def headline(sub: pd.DataFrame) -> dict:
             "n_patients": int(sub["patient_id"].nunique())}
 
 
+# Keyed by severity ("all" + strata) × period (all / year / month) — 4 × 92 aggregated tables.
 table1, period_headline = {}, {}
-table1["all"] = build_table1(status_t)
-period_headline["all"] = headline(status_t)
-for y in years:
-    sy = status_t[status_t["year"] == y]
-    table1[y] = build_table1(sy); period_headline[y] = headline(sy)
-for mo in months:
-    sm = status_t[status_t["month"] == mo]
-    table1[mo] = build_table1(sm); period_headline[mo] = headline(sm)
+for sk in ["all"] + SEVS:
+    base = status_t if sk == "all" else status_t[status_t["severity"] == sk]
+    table1[sk], period_headline[sk] = {}, {}
+    table1[sk]["all"] = build_table1(base); period_headline[sk]["all"] = headline(base)
+    for y in years:
+        sy = base[base["year"] == y]
+        table1[sk][y] = build_table1(sy); period_headline[sk][y] = headline(sy)
+    for mo in months:
+        sm = base[base["month"] == mo]
+        table1[sk][mo] = build_table1(sm); period_headline[sk][mo] = headline(sm)
 
 cohort_headline = {
     **headline(status_t),
     "day_min": str(pd.to_datetime(status["calendar_day"]).min().date()),
     "day_max": str(pd.to_datetime(status["calendar_day"]).max().date()),
 }
-table1_html = table1["all"]  # initial render (all-time)
+table1_html = table1["all"]["all"]  # initial render (all-time, all-severity)
 
 payload = jsonable({
     "params": {"vt_grid": VT_GRID, "vt_default": VT_DEFAULT, "plateau_max": PLATEAU_MAX,
                "dp_max": DP_MAX, "adherence_fraction": agg["params"]["adherence_fraction"],
                "min_assessable_min": agg["params"]["min_assessable_min"]},
-    "months": months, "years": years, "units": units, "days": days,
+    "months": months, "years": years, "units": units, "days": days, "severity_strata": SEVS,
     "unit_label": UNIT_LABEL, "measure_label": MEASURE_LABEL,
     "cohort_headline": cohort_headline, "period_headline": period_headline,
-    "vtc": vtc, "stc": stc, "vtd": vtd, "std": std, "histc": histc, "table1": table1,
+    "tot": tot, "ass": ass, "ad": ad, "stc": stc, "vtd": vtd, "std": std,
+    "histc": histc, "table1": table1,
 })
 
 # ----------------------------------------------------------------------------
@@ -410,8 +442,10 @@ const baseLayout = extra => Object.assign({font:FONT, margin:{l:54,r:18,t:28,b:4
   yaxis:{tickformat:".0%", rangemode:"tozero", gridcolor:"#f1f5f9"},
   xaxis:{gridcolor:"#f8fafc"}, legend:{font:{size:11}}}, extra||{});
 const CFG = {displayModeBar:false, responsive:true};
-let state = {cutoff:P.params.vt_default, trendMeasure:"vt", year:"all", month:"all"};
+let state = {cutoff:P.params.vt_default, trendMeasure:"vt", year:"all", month:"all", severity:"all"};
 let active = "p-vt";
+function sevList(){ return state.severity==="all" ? P.severity_strata : [state.severity]; }
+const SEV_LABEL = {all:"all severity", severe:"severe resp failure", not_severe:"not severe", unknown:"unknown (no usable O₂)"};
 
 // ---------- Period helpers ----------
 function periodKey(){
@@ -431,19 +465,31 @@ function periodIdxs(){
 }
 function periodSpan(idxs){ return idxs.length ? [Math.min(...idxs), Math.max(...idxs)] : null; }
 
-// ---------- Count summing -> rates ----------
-function sum3(o, idxs){ let ad=0,ass=0,tot=0; for(const i of idxs){ad+=o.ad[i];ass+=o.ass[i];tot+=o.tot[i];} return {ad,ass,tot}; }
-function rates(s){ return {ar:s.ass? s.ad/s.ass:null, pct:s.tot? s.ass/s.tot:null, crude:s.tot? s.ad/s.tot:null}; }
+// ---------- Count summing -> rates (over period months × selected severity strata) ----------
+function rates(ad, ass, tot){ return {ar:ass? ad/ass:null, pct:tot? ass/tot:null, crude:tot? ad/tot:null}; }
 function mRate(measure, unit, idxs){
-  const ck=CK(state.cutoff);
-  const o = (measure==="vt"||measure==="comp") ? P.vtc[unit][ck][measure] : P.stc[measure][unit];
-  return rates(sum3(o, idxs));
+  const sevs=sevList(); let ad=0,ass=0,tot=0;
+  if(measure==="vt"||measure==="comp"){
+    const ck=CK(state.cutoff);
+    for(const s of sevs){
+      const adA=P.ad[unit][measure][ck][s], asA=P.ass[unit][measure][s], toA=P.tot[unit][s];
+      for(const i of idxs){ ad+=adA[i]; ass+=asA[i]; tot+=toA[i]; }
+    }
+  } else {
+    for(const s of sevs){ const o=P.stc[measure][unit][s]; for(const i of idxs){ ad+=o.ad[i]; ass+=o.ass[i]; tot+=o.tot[i]; } }
+  }
+  return rates(ad,ass,tot);
 }
-// Full monthly series for a measure/unit (trends keep the whole timeline)
+// Full monthly series for a measure/unit (sum severity per month; trends keep the whole timeline)
 function trendSeries(measure, unit){
-  const ck=CK(state.cutoff);
-  const o = (measure==="vt"||measure==="comp") ? P.vtc[unit][ck][measure] : P.stc[measure][unit];
-  return o.ad.map((ad,i)=> o.ass[i] ? ad/o.ass[i] : null);
+  const sevs=sevList(), n=P.months.length, y=new Array(n), isVt=(measure==="vt"||measure==="comp"), ck=CK(state.cutoff);
+  for(let i=0;i<n;i++){
+    let ad=0,ass=0;
+    if(isVt){ for(const s of sevs){ ad+=P.ad[unit][measure][ck][s][i]; ass+=P.ass[unit][measure][s][i]; } }
+    else { for(const s of sevs){ const o=P.stc[measure][unit][s]; ad+=o.ad[i]; ass+=o.ass[i]; } }
+    y[i] = ass ? ad/ass : null;
+  }
+  return y;
 }
 function unitTraces(measure){
   return P.units.map(u=>({
@@ -498,14 +544,15 @@ function setText(){
   document.getElementById('cb-comp-pct').textContent = "assessable on "+PCT(comp.pct);
 }
 function setHeaderAndTable(){
-  const k=periodKey(), ph=P.period_headline[k]||P.cohort_headline;
-  const lbl=periodLabel();
+  const k=periodKey(), sv=state.severity;
+  const ph=(P.period_headline[sv]||P.period_headline["all"])[k] || P.cohort_headline;
+  const lbl=periodLabel(), sevTxt = (sv==="all") ? "" : " · "+SEV_LABEL[sv];
   document.getElementById('period-readout').textContent = lbl;
   document.getElementById('cohort-line').textContent =
     ph.n_patient_days.toLocaleString()+" IMV-on-ICU patient-days · "+
-    ph.n_hosps.toLocaleString()+" hospitalizations · "+ph.n_patients.toLocaleString()+" patients ("+lbl+")";
-  document.getElementById('table1-box').innerHTML = P.table1[k]||P.table1["all"];
-  document.getElementById('t1-period').textContent = " — "+lbl;
+    ph.n_hosps.toLocaleString()+" hospitalizations · "+ph.n_patients.toLocaleString()+" patients ("+lbl+sevTxt+")";
+  document.getElementById('table1-box').innerHTML = (P.table1[sv]||P.table1["all"])[k] || P.table1["all"]["all"];
+  document.getElementById('t1-period').textContent = " — "+lbl+sevTxt;
 }
 
 // ---------- Per-panel draw (panel visible when called) ----------
@@ -535,14 +582,16 @@ function drawTrends(){
     baseLayout({margin:{l:54,r:18,t:10,b:90}}), CFG);
   document.getElementById('tr-note').textContent =
     (isVt ? ("Vt cutoff "+Number(state.cutoff).toFixed(1)+" mL/kg") : "Fixed threshold") + " · "+periodLabel()
-    + (isMonth()? " · daily, site-wide" : "");
+    + (state.severity!=="all" ? " · "+SEV_LABEL[state.severity] : "")
+    + (isMonth()? " · daily, site-wide (all severity)" : "");
 }
 function drawDist(){
-  const idxs=periodIdxs();
+  const idxs=periodIdxs(), sevs=sevList();
   ["vt_per_pbw","plateau","driving_pressure","peep","fio2"].forEach(col=>{
     const h=P.histc[col], n=h.centers.length;
     let tot=0; const agg=new Array(n).fill(0);
-    for(const i of idxs){ const row=h.counts[i]; for(let b=0;b<n;b++){agg[b]+=row[b];} }
+    for(const s of sevs){ const C=h.counts[s];
+      for(const i of idxs){ const row=C[i]; for(let b=0;b<n;b++){agg[b]+=row[b];} } }
     for(const v of agg) tot+=v;
     const frac=agg.map(v=> tot? v/tot : 0);
     const thr=(h.threshold==="slider")?state.cutoff:h.threshold;
@@ -583,6 +632,10 @@ function onPeriodChange(){
 }
 document.getElementById('sel-year').onchange = onPeriodChange;
 monthSel.onchange = onPeriodChange;
+document.getElementById('sel-severity').onchange = e => {
+  state.severity = e.target.value;
+  setText(); setHeaderAndTable(); DRAW[active]();
+};
 
 // ---------- Init ----------
 monthSel.disabled = true;
@@ -599,6 +652,10 @@ unit_opts = "".join(f'<option value="{m}">{html.escape(MEASURE_LABEL[m])}</optio
 year_opts = '<option value="all">All years</option>' + "".join(f'<option value="{y}">{y}</option>' for y in years)
 _MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 month_opts = '<option value="all">All months</option>' + "".join(f'<option value="{i:02d}">{_MON[i-1]}</option>' for i in range(1, 13))
+sev_opts = ('<option value="all">All severity</option>'
+            '<option value="severe">Severe resp failure</option>'
+            '<option value="not_severe">Not severe</option>'
+            '<option value="unknown">Unknown (no O₂)</option>')
 ch = cohort_headline
 
 BODY = f"""
@@ -613,6 +670,8 @@ BODY = f"""
     <span class="val"><span id="cutoff-readout">{VT_DEFAULT:.1f}</span> mL/kg</span>
     <span class="hint">Plateau ≤ {PLATEAU_MAX:.0f} &amp; ∆P ≤ {DP_MAX:.0f} fixed</span>
     <span style="flex:1 1 24px"></span>
+    <label>Severity</label>
+    <select id="sel-severity" title="Severe respiratory failure = P/F<300 or S/F<315 (SpO₂≤97%) with PEEP>5">{sev_opts}</select>
     <label>Period</label>
     <select id="sel-year">{year_opts}</select>
     <select id="sel-month">{month_opts}</select>
@@ -715,9 +774,15 @@ c6 = f"{VT_DEFAULT:.1f}"
 
 
 def alltime_rate(measure, cutoff_key=c6):
-    """Reproduce 02_features assessable_rate by summing all-month counts for __ALL__."""
-    o = pl["vtc"]["__ALL__"][cutoff_key][measure] if measure in ("vt", "comp") else pl["stc"][measure]["__ALL__"]
-    ad, ass = sum(o["ad"]), sum(o["ass"])
+    """Reproduce 02_features assessable_rate: sum all months × all severity strata for __ALL__."""
+    ad = ass = 0
+    for s in pl["severity_strata"]:
+        if measure in ("vt", "comp"):
+            ad += sum(pl["ad"]["__ALL__"][measure][cutoff_key][s])
+            ass += sum(pl["ass"]["__ALL__"][measure][s])
+        else:
+            o = pl["stc"][measure]["__ALL__"][s]
+            ad += sum(o["ad"]); ass += sum(o["ass"])
     return ad / ass if ass else float("nan")
 
 
@@ -728,9 +793,13 @@ checks = {
     "dp == 02_features (48.24%)": abs(alltime_rate("dp") - feat["per_measure"]["dp"]["assessable_rate"]) < 1e-6,
     "slider endpoint vt@10 > 0.90": alltime_rate("vt", "10.0") > 0.90,
     "period selectors present": 'id="sel-year"' in text and 'id="sel-month"' in text,
-    "table1 has all+year+month keys": ("all" in pl["table1"] and pl["years"][0] in pl["table1"]
-                                       and pl["months"][0] in pl["table1"]),
-    "per-month hist counts present": all(len(pl["histc"][c]["counts"]) == len(pl["months"]) for c in pl["histc"]),
+    "severity selector present": 'id="sel-severity"' in text,
+    "table1 nested by severity×period": (all(s in pl["table1"] for s in ["all"] + pl["severity_strata"])
+                                         and "all" in pl["table1"]["all"]
+                                         and pl["years"][0] in pl["table1"]["all"]
+                                         and pl["months"][0] in pl["table1"]["all"]),
+    "per-month hist counts present (per stratum)":
+        all(len(pl["histc"][c]["counts"]["severe"]) == len(pl["months"]) for c in pl["histc"]),
     "daily site-wide data present": (len(pl["days"]) > 2000 and "6.0" in pl["vtd"] and "plat" in pl["std"]),
     "plotly inlined": "Plotly" in text[:300000],
     "slider input present": 'id="vt-slider"' in text,
@@ -751,17 +820,28 @@ for _t in re.finditer(r'<div\b|</div>|id="(p-(?:vt|comp|trend|dist))"', _body):
     else:
         _at[_t.group(1)] = _depth
 checks["4 panels are siblings (not nested)"] = len(set(_at.values())) == 1 and len(_at) == 4
-# Daily counts summed over a month must equal that month's monthly count (same upstream data).
+# Daily (all-severity) counts over a month must equal that month's monthly count summed over severity.
 _mo = pl["months"][len(pl["months"]) // 2]
+_mi = pl["months"].index(_mo)
 _didx = [i for i, d in enumerate(pl["days"]) if d[:7] == _mo]
 _daily_sum = sum(pl["vtd"]["6.0"]["vt"]["ad"][i] for i in _didx)
-_monthly = pl["vtc"]["__ALL__"]["6.0"]["vt"]["ad"][pl["months"].index(_mo)]
+_monthly = sum(pl["ad"]["__ALL__"]["vt"]["6.0"][s][_mi] for s in pl["severity_strata"])
 checks[f"daily≡monthly counts ({_mo})"] = (_daily_sum == _monthly)
+
+
+def sev_rate(measure, sev, ck=c6):
+    ad = sum(pl["ad"]["__ALL__"][measure][ck][sev]); ass = sum(pl["ass"]["__ALL__"][measure][sev])
+    return ad / ass if ass else float("nan")
+
+
+checks["severe != not_severe (vt@6)"] = abs(sev_rate("vt", "severe") - sev_rate("vt", "not_severe")) > 1e-6
 for k, v in checks.items():
     print(f"  [{'ok' if v else 'XX'}] {k}")
 print(f"\n  Vt slider (site-wide assessable): " +
       " ".join(f"{c:g}:{alltime_rate('vt', f'{c:.1f}')*100:.0f}%" for c in [4.0, 6.0, 8.0, 10.0]))
-print(f"  Per-period Table 1 / headline: {len(pl['table1'])} periods (all + {len(pl['years'])} years + {len(pl['months'])} months)")
+print(f"  Vt@6 by severity: severe {sev_rate('vt','severe')*100:.1f}% · "
+      f"not_severe {sev_rate('vt','not_severe')*100:.1f}% · unknown {sev_rate('vt','unknown')*100:.1f}%")
+print(f"  Per-period Table 1: {len(pl['table1']['all'])} periods × {len(pl['table1'])} severity keys")
 assert all(checks.values()), "VERIFICATION FAILED"
 print("\nAll checks passed. Done.")
 

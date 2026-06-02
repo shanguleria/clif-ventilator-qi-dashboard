@@ -71,6 +71,28 @@ So `02_features.py` computes **four measures, each on its OWN denominator**, all
 
 ---
 
+## 4b. Severity stratifier — "severe respiratory failure" (decided 2026-06-02)
+
+A dashboard **filter** slices every panel by the presence/absence of severe respiratory failure on each
+patient-day. This is **not** full Berlin ARDS (no imaging/origin criteria) — just low oxygenation while on PEEP:
+
+- a patient-day is **severe** if, at any oxygenation assessment that day, **(P/F < 300) or (S/F < 315)** **and**
+  **PEEP > 5** (strict);
+- **P/F** = PaO₂(`labs.po2_arterial`)/FiO₂; **S/F** = SpO₂(`vitals.spo2`)/FiO₂ is the surrogate used when no arterial
+  PaO₂ is available, valid only when **SpO₂ ≤ 97%** (saturation plateau). S/F 315 is the established equivalent of
+  P/F 300 (Rice 2007);
+- FiO₂ and PEEP paired to each PaO₂/SpO₂ via a **≤ 4-hour backward lookback** (`merge_asof`); both must be present
+  for the assessment to be usable. Classification uses the **worst** oxygenation of the day.
+- **Strata:** `severe` / `not_severe` (≥1 usable assessment, none qualifying) / `unknown` (no usable assessment).
+  Named constants in `code/02d_severity.py` (`PF_THRESHOLD`, `SF_THRESHOLD`, `SPO2_MAX_FOR_SF`, `PEEP_MIN`,
+  `O2_FIO2_LOOKBACK`) so any site can tune them.
+- **Empirical (UChicago; `output/02d_severity_summary.json`):** severe 40.1% · not_severe 52.0% · unknown 7.9%
+  (S/F backfill classified ~21% of days that lacked an ABG, cutting unknown from 24% to 8%). Adherence diverges
+  coherently — at Vt≤6: severe **27.4%** vs not-severe 22.8% (low-Vt is targeted more in sicker patients), while
+  Pplat (77.3% vs 86.0%) and Pdriving (38.5% vs 48.2%) are **lower** in severe (stiffer lungs).
+
+---
+
 ## 5. Mode eligibility
 
 LPV thresholds are not meaningful when the patient is breathing spontaneously without volume targeting. We restrict the **assessable denominator** to mode-eligible rows:
@@ -158,6 +180,7 @@ Persisted artifacts (the pipeline splits cohort-building from classification, so
 
 1. **`output/01_cohort_patient_days.parquet`** _(by `01_cohort.py`)_ — the cohort skeleton, one row per (hospitalization_id, calendar_day) for the IMV-on-ICU cohort. Columns: hospitalization_id, patient_id, calendar_day, assigned_unit, sex_category, age_at_admit, height_cm, pbw_kg, n_imv_rows. **No adherence columns** — this file just defines the cohort.
 2. **`output/02_patient_day_status.parquet`** _(by `02_features.py`)_ — one row per cohort patient-day, **wide with four component-separated measures** (`m` ∈ {`vt`, `plat`, `dp`, `comp`}; see §4a). Columns: hospitalization_id, patient_id, calendar_day, assigned_unit, sex_category, age_at_admit, height_cm, pbw_kg, encounter_span_days, long_span_flag, total_imv_minutes, mode_eligible_minutes, and for each measure `{m}_assessable_min, {m}_in_min, {m}_bundle_fraction, {m}_status` (status ∈ adherent/non_adherent/not_assessable). Vt + composite status use the **default cutoff `VT_MAX_DEFAULT = 6`**; the slider recomputes downstream from artifact #3. _(`encounter_span_days`/`long_span_flag` per the 2026-06-01 keep-all-flag-only decision; flag = encounter span > 200 d.)_
+2b. **`output/02d_severity.parquet`** _(by `02d_severity.py`)_ — one row per cohort patient-day with the severe-respiratory-failure stratifier (§4b). Columns: hospitalization_id, calendar_day, `severity` (severe/not_severe/unknown), worst_pf, worst_sf, class_source. Joined into `03` (rollup severity dimension) and `04` (Table 1 + histogram strata).
 3. **`output/02_intervals.parquet`** _(by `02_features.py`)_ — one row per **mode-eligible IMV** interval-piece (NOT just all-three-present), the engine for the Vt-cutoff slider and the settings-distribution histograms. Columns: hospitalization_id, calendar_day, assigned_unit, duration_min, vt_per_pbw, plateau, driving_pressure, peep, fio2. **Component values are nullable and presence-encoding**: `vt_per_pbw` null ⇒ Vt not assessable for that piece; `plateau` null ⇒ plateau absent; `driving_pressure` null ⇒ plateau or PEEP absent. Histograms/recomputes over this table must be **time-weighted by `duration_min`**, with each measure filtered to its own non-null subset. _(Replaces the earlier composite-only `02_assessable_intervals.parquet`, deleted; rebuilt 2026-06-01 for component separation.)_
 4. **`output/03_daily_unit_summary.parquet`** _(by `03_aggregate.py`)_ — **long** format: one row per (calendar_day, assigned_unit [incl. pooled `__ALL__`], `measure` ∈ {vt, plat, dp, comp}). Columns: n_total, n_adherent, n_non_adherent, n_not_assessable, assessable_rate, crude_rate. At default Vt = 6.
 5. **`output/03_monthly_unit_summary.parquet`** _(by `03_aggregate.py`)_ — same long shape, `month` = `'YYYY-MM'`.
