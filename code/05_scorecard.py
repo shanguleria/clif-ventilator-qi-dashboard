@@ -10,7 +10,7 @@ ventilator QI bundle metrics. The scorecard is a *combiner* — it is REGISTRY-D
     small, PHI-free `tile_feed_<metric>.json`. Their paths are listed in config.json under
     `scorecard_tiles`; this script reads each, validates it, copies its detail dashboard into
     the bundle, and renders it through ONE shared tile component.
-  * A metric with no feed shows a styled "Not yet computed" placeholder, so the scorecard
+  * A metric with no feed shows a styled "Coming soon..." placeholder, so the scorecard
     always builds even if a sibling project hasn't run.
 
 Contract: plans/02_scorecard_tile_contract.md (authoritative for the feed schema + grain fallback).
@@ -333,8 +333,14 @@ min-height:370px;position:relative;}
 .card .ico{width:40px;height:40px;color:var(--maroon);margin-bottom:6px;}
 /* All tile illustrations the same size, above the title. */
 .card img.ico{width:108px;height:108px;object-fit:contain;margin:2px 0 6px;}
-.card .mname{font-weight:800;font-size:18px;color:var(--maroon-d);letter-spacing:.3px;}
-.card .msub{font-size:11.5px;color:var(--muted);margin:1px 0 10px;min-height:15px;}
+/* Fixed-height header zone (title + subtitle) so every donut starts at the same y,
+   regardless of how many lines the title/subtitle wrap to. Titles/subtitles clamp to 2 lines. */
+.card .cardhead{display:flex;flex-direction:column;align-items:center;justify-content:center;
+width:100%;height:80px;margin:0 0 6px;}
+.card .mname{font-weight:800;font-size:18px;color:var(--maroon-d);letter-spacing:.3px;line-height:1.18;
+display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;}
+.card .msub{font-size:11.5px;color:var(--muted);margin:3px 0 0;line-height:1.3;
+display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;}
 .badge{display:inline-block;margin-left:6px;font-size:10px;color:var(--maroon);background:#f3e3e5;
 border-radius:999px;padding:1px 7px;font-weight:700;letter-spacing:.3px;vertical-align:middle;}
 .donut{position:relative;width:128px;height:128px;margin:2px 0 6px;}
@@ -467,8 +473,8 @@ function tileCard(feed){
   const note  = feed.note ? `<div class="tilenote">${esc(feed.note)}</div>` : '';
   const badge = R.badge ? `<span class="badge">${esc(R.badge.trim())}</span>` : '';
   const link  = feed.detail_href ? `<span class="cardlink">View details →</span>` : '';
-  const inner = `${P.iconHtml[feed.icon]||''}<div class="mname">${esc(feed.title)}</div>`
-    + `<div class="msub">${esc(feed.subtitle||'')}${badge}</div>${donut}`
+  const inner = `${P.iconHtml[feed.icon]||''}<div class="cardhead"><div class="mname">${esc(feed.title)}</div>`
+    + `<div class="msub">${esc(feed.subtitle||'')}${badge}</div></div>${donut}`
     + `<div class="denom">${denom}</div>${denomsub}${goal}${segs}${spark}${note}${link}`;
   const cls = 'card' + (feed.metric_id==='lpv' ? ' lpv' : '');
   return feed.detail_href
@@ -478,9 +484,9 @@ function tileCard(feed){
 
 function placeholderCard(id){
   const m = P.placeholders[id] || {icon:id, title:id, subtitle:''};
-  return `<div class="card ph">${P.iconHtml[m.icon]||''}<div class="mname">${esc(m.title)}</div>`
-    + `<div class="msub">${esc(m.subtitle||'')}</div><div class="bignum">—</div>`
-    + `<div class="phnote">Not yet computed</div></div>`;
+  return `<div class="card ph">${P.iconHtml[m.icon]||''}<div class="cardhead"><div class="mname">${esc(m.title)}</div>`
+    + `<div class="msub">${esc(m.subtitle||'')}</div></div><div class="bignum">—</div>`
+    + `<div class="phnote">Coming soon...</div></div>`;
 }
 
 function render(){
