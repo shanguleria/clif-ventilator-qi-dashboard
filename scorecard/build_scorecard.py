@@ -32,6 +32,7 @@ from __future__ import annotations
 import base64
 import html
 import json
+import re
 import shutil
 from datetime import datetime
 from io import BytesIO
@@ -43,199 +44,112 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]              # bundle root (scorecard/ is one level down)
 CFG = json.loads((ROOT / "config.json").read_text())
 SITE = CFG.get("site", "Your Site")
-LPV_OUT = ROOT / "metrics" / "lpv" / "output"           # LPV pipeline parquets live here now
-DASH_DIR = ROOT / "output" / "dashboard"                # shared shippable bundle (scorecard + drill-downs)
+DASH_DIR = ROOT / "output" / "dashboard"   # shared shippable bundle (scorecard + per-metric drill-downs)
+FEEDS_DIR = ROOT / "feeds"                 # PHI-free feed collection (the per-site consortium submission set)
 DASH_DIR.mkdir(parents=True, exist_ok=True)
+FEEDS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---- Named parameters ----
-SCORECARD_VT_CUTOFF = 8.0   # headline Vt/kg cutoff for the scorecard tile
-LPV_GOAL = 0.90             # target line on the LPV tile
-ADHERENCE_FRACTION = 0.80
-MIN_ASSESSABLE_MIN = 60
-
-# Tile slot order on the scorecard. A slot with a matching feed (built here or loaded from
-# `scorecard_tiles`) renders a real tile; otherwise it falls back to a placeholder.
-TILE_ORDER = ["lpv", "sat", "sbt", "proning", "mob"]
+TILE_ORDER = ["lpv", "sat", "sbt", "proning", "mob"]   # slot order; a slot with no feed -> placeholder
 PLACEHOLDER_META = {
     "sat":     {"icon": "sat",   "title": "SAT Completion", "subtitle": "Spontaneous Awakening Trials"},
     "sbt":     {"icon": "sbt",   "title": "SBT Completion", "subtitle": "Spontaneous Breathing Trials"},
     "proning": {"icon": "prone", "title": "ARDS Proning",   "subtitle": "Eligible ARDS patients"},
     "mob":     {"icon": "mob",   "title": "Mobilization",   "subtitle": "Target mobilization achieved"},
 }
-
 UNIT_ORDER_REST = ["medical_icu", "mixed_cardiothoracic_icu", "surgical_icu",
                    "mixed_neuro_icu", "general_icu", "burn_icu"]
 UNIT_LABEL = {"__ALL__": "All ICUs", "medical_icu": "Medical ICU",
               "mixed_cardiothoracic_icu": "Cardiothoracic ICU", "surgical_icu": "Surgical ICU",
               "mixed_neuro_icu": "Neuro ICU", "general_icu": "General ICU", "burn_icu": "Burn ICU"}
 
-# ----------------------------------------------------------------------------
-# 1. Load + per-(hosp, day) Vt<=8 recompute (status file is default-6)
-# ----------------------------------------------------------------------------
-
-print("[1] Loading + computing Vt<=8 per patient-day ...")
-status = pd.read_parquet(LPV_OUT / "02_patient_day_status.parquet")
-status["hospitalization_id"] = status["hospitalization_id"].astype(str)
-status["calendar_day"] = pd.to_datetime(status["calendar_day"]).dt.date
-
-iv = pd.read_parquet(LPV_OUT / "02_intervals.parquet")
-iv["hospitalization_id"] = iv["hospitalization_id"].astype(str)
-iv["calendar_day"] = pd.to_datetime(iv["calendar_day"]).dt.date
-key = ["hospitalization_id", "calendar_day"]
-gk = [iv["hospitalization_id"], iv["calendar_day"]]
-vt_present = iv["vt_per_pbw"].notna()
-vt_assess = iv["duration_min"].where(vt_present, 0.0).groupby(gk).sum()
-vt8_in = iv["duration_min"].where(vt_present & (iv["vt_per_pbw"] <= SCORECARD_VT_CUTOFF), 0.0).groupby(gk).sum()
-vt = pd.DataFrame({"vt_assess_min": vt_assess, "vt8_in_min": vt8_in}).reset_index()
-vt.columns = key + ["vt_assess_min", "vt8_in_min"]
-
-sev = pd.read_parquet(LPV_OUT / "02d_severity.parquet")[["hospitalization_id", "calendar_day", "severity"]]
-sev["hospitalization_id"] = sev["hospitalization_id"].astype(str)
-sev["calendar_day"] = pd.to_datetime(sev["calendar_day"]).dt.date
-
-day = status[["hospitalization_id", "calendar_day", "assigned_unit", "total_imv_minutes",
-              "plat_status", "dp_status"]].merge(vt, on=key, how="left").merge(sev, on=key, how="left")
-day[["vt_assess_min", "vt8_in_min"]] = day[["vt_assess_min", "vt8_in_min"]].fillna(0.0)
-day["severity"] = day["severity"].fillna("unknown")
-
-# Per-day adherence booleans
-day["vt8_ass"] = day["vt_assess_min"] >= MIN_ASSESSABLE_MIN
-day["vt8_ad"] = day["vt8_ass"] & ((day["vt8_in_min"] / day["vt_assess_min"].where(day["vt_assess_min"] > 0)) >= ADHERENCE_FRACTION)
-day["plat_ass"] = day["plat_status"].isin(["adherent", "non_adherent"])
-day["plat_ad"] = day["plat_status"] == "adherent"
-day["dp_ass"] = day["dp_status"].isin(["adherent", "non_adherent"])
-day["dp_ad"] = day["dp_status"] == "adherent"
-
-# ISO week + calendar month buckets
-_dt = pd.to_datetime(day["calendar_day"])
-isoc = _dt.dt.isocalendar()
-day["week"] = isoc["year"].astype(str) + "-W" + isoc["week"].astype(int).map("{:02d}".format)
-day["month"] = _dt.dt.strftime("%Y-%m")
+# Which metrics to load, in slot order. Each is its OWN vertical that emits a v1 feed at
+# metrics/<id>/output/final/tile_feed_<id>.json (LPV included -- full symmetry). The combiner only
+# collects + renders; it computes nothing metric-specific itself.
+METRICS_ENABLED = CFG.get("metrics", TILE_ORDER)
 
 # ----------------------------------------------------------------------------
-# 2. Roll up to (unit, period) cells and assemble the in-memory LPV feed
+# 1. Collect each enabled metric's tile feed (stage feed -> feeds/, detail -> dashboard/)
 # ----------------------------------------------------------------------------
 
-print("[2] Building the LPV tile feed (per unit × all/month/week) ...")
-weeks = sorted(day["week"].unique().tolist())
-months = sorted(day["month"].unique().tolist())
-units = ["__ALL__"] + [u for u in UNIT_ORDER_REST if u in set(day["assigned_unit"])]
-rep = day.groupby("week")["calendar_day"].min()
-week_label = {w: f"Week {w[-2:].lstrip('0')} · {pd.Timestamp(rep[w]).strftime('%b %Y')}" for w in weeks}
-month_label = {m: pd.Timestamp(m + "-01").strftime("%b %Y") for m in months}
-
-
-def cell_counts(df: pd.DataFrame) -> dict:
-    """(numerator, denominator) per measure + denominator-line counts, for one (unit, period) slice."""
-    sevdf = df[df["severity"] == "severe"]
-    return {
-        "vt8": (int(df["vt8_ad"].sum()), int(df["vt8_ass"].sum())),
-        "plat": (int(df["plat_ad"].sum()), int(df["plat_ass"].sum())),
-        "dp": (int(df["dp_ad"].sum()), int(df["dp_ass"].sum())),
-        "vt8sev": (int(sevdf["vt8_ad"].sum()), int(sevdf["vt8_ass"].sum())),
-        "n": int(len(df)),
-        "hrs": round(float(df["total_imv_minutes"].sum()) / 60.0),
-    }
-
-
-# raw[unit][period_key] = cell_counts(...)  for period_key in {"all"} ∪ weeks ∪ months
-raw = {u: {} for u in units}
-raw["__ALL__"]["all"] = cell_counts(day)
-for u, gu in day.groupby("assigned_unit"):
-    if u in raw:
-        raw[u]["all"] = cell_counts(gu)
-for bucket in ("week", "month"):
-    for b, gb in day.groupby(bucket):
-        raw["__ALL__"][b] = cell_counts(gb)
-        for u, gu in gb.groupby("assigned_unit"):
-            if u in raw:
-                raw[u][b] = cell_counts(gu)
-
-
-def headline_cells() -> dict:
-    out = {}
-    for u, periods in raw.items():
-        out[u] = {pk: {"num": c["vt8"][0], "den": c["vt8"][1], "n": c["n"], "hrs": c["hrs"]}
-                  for pk, c in periods.items()}
-    return out
-
-
-def measure_cells(mkey: str) -> dict:
-    out = {}
-    for u, periods in raw.items():
-        out[u] = {pk: {"num": c[mkey][0], "den": c[mkey][1]} for pk, c in periods.items()}
-    return out
-
-
-cut = f"{SCORECARD_VT_CUTOFF:g}"
-lpv_feed = {
-    "schema_version": 1,
-    "metric_id": "lpv",
-    "title": "LPV Adherence",
-    "subtitle": f"Tidal volume ≤ {cut} mL/kg PBW",
-    "icon": "lpv",
-    "detail_href": "lpv_dashboard.html",
-    "goal": LPV_GOAL,
-    "note": None,
-    "grain": {"units": units, "periods": ["all", "month", "week"]},
-    "headline": {"label": "adherent", "den_label": "of assessable", "n_unit": "patient-days",
-                 "cells": headline_cells()},
-    "segments": [
-        {"key": "plat", "label": "Plateau ≤ 30", "cells": measure_cells("plat")},
-        {"key": "dp", "label": "∆P ≤ 15", "cells": measure_cells("dp")},
-        {"key": "vt8sev", "label": f"Vt ≤ {cut} · severe", "cells": measure_cells("vt8sev")},
-    ],
-}
-
-# ----------------------------------------------------------------------------
-# 2b. Load external tile feeds (config `scorecard_tiles`) + ship their detail dashboards
-# ----------------------------------------------------------------------------
-
-print("[2b] Loading external tile feeds ...")
+print("[1] Collecting metric tile feeds ...")
 REQUIRED_FEED_KEYS = {"schema_version", "metric_id", "title", "grain", "headline"}
 
 
-def load_external_feed(path_str: str):
-    p = Path(path_str)
-    if not p.is_absolute():
-        p = (ROOT / p).resolve()
-    if not p.exists():
-        print(f"  [skip] feed not found: {p}")
+def load_feed(fp):
+    # Read + validate one tile_feed_<id>.json (schema_version 1, required keys, PHI-free).
+    if not fp.exists():
         return None
     try:
-        feed = json.loads(p.read_text())
-    except Exception as e:  # malformed JSON shouldn't break the whole scorecard
-        print(f"  [skip] feed unreadable ({e}): {p}")
+        feed = json.loads(fp.read_text())
+    except Exception as e:
+        print(f"  [skip] feed unreadable ({e}): {fp}")
         return None
     if feed.get("schema_version") != 1:
-        print(f"  [skip] unsupported schema_version={feed.get('schema_version')}: {p}")
+        print(f"  [skip] unsupported schema_version={feed.get('schema_version')}: {fp}")
         return None
     missing = REQUIRED_FEED_KEYS - set(feed)
     if missing:
-        print(f"  [skip] feed missing keys {missing}: {p}")
+        print(f"  [skip] feed missing keys {missing}: {fp}")
         return None
-    # PHI guard: a tile feed must be aggregated, never row-level.
-    dump = json.dumps(feed)
-    assert "hospitalization_id" not in dump and "patient_id" not in dump, f"PHI substring in feed {p}"
-    # Ship the detail dashboard alongside the scorecard so the tile's link resolves.
-    href = feed.get("detail_href")
-    if href:
-        src = p.parent / href
-        if src.exists():
-            shutil.copyfile(src, DASH_DIR / href)
-            print(f"  [feed] {feed['metric_id']}: loaded; copied '{href}' into dashboard/")
-        else:
-            print(f"  [feed] {feed['metric_id']}: loaded; detail '{href}' missing at {src} -> dropping link")
-            feed["detail_href"] = None
-    else:
-        print(f"  [feed] {feed['metric_id']}: loaded (no detail link)")
+    assert "hospitalization_id" not in json.dumps(feed) and "patient_id" not in json.dumps(feed), \
+        f"PHI substring in feed {fp}"
     return feed
 
 
-external_feeds = [f for f in (load_external_feed(s) for s in CFG.get("scorecard_tiles", [])) if f]
-feeds = [lpv_feed] + external_feeds
+feeds = []
+for mid in METRICS_ENABLED:
+    fp = ROOT / "metrics" / mid / "output" / "final" / f"tile_feed_{mid}.json"
+    feed = load_feed(fp)
+    if feed is None:
+        print(f"  [skip] {mid}: no feed at {fp} -> placeholder")
+        continue
+    shutil.copyfile(fp, FEEDS_DIR / f"tile_feed_{mid}.json")   # stage for consortium submission
+    href = feed.get("detail_href")
+    if href and (fp.parent / href).exists():
+        shutil.copyfile(fp.parent / href, DASH_DIR / href)
+        print(f"  [feed] {mid}: loaded; copied '{href}' into dashboard/")
+    elif href:
+        print(f"  [feed] {mid}: loaded; detail '{href}' missing -> dropping link")
+        feed["detail_href"] = None
+    else:
+        print(f"  [feed] {mid}: loaded (no detail link)")
+    feeds.append(feed)
+
 feeds_by_id = {f["metric_id"]: f for f in feeds}
 print(f"  feeds ready: {[f['metric_id'] for f in feeds]}")
+
+# ----------------------------------------------------------------------------
+# 2. Global UI selectors (weeks / months / units). The finest-grained feed (LPV) carries a 'ui'
+#    block; otherwise derive from the union of feed cell keys.
+# ----------------------------------------------------------------------------
+
+def _derive_ui(feeds):
+    wk, mo, seen = set(), set(), []
+    for f in feeds:
+        for u, per in f.get("headline", {}).get("cells", {}).items():
+            if u != "__ALL__" and u not in seen:
+                seen.append(u)
+            for pk in per:
+                if re.fullmatch(r"\d{4}-W\d{2}", pk):
+                    wk.add(pk)
+                elif re.fullmatch(r"\d{4}-\d{2}", pk):
+                    mo.add(pk)
+    weeks = sorted(wk)
+    months = sorted(mo)
+    wl = {w: f"Week {w[-2:].lstrip('0')} · {datetime.strptime(w + '-1', '%G-W%V-%u').strftime('%b %Y')}"
+          for w in weeks}
+    ml = {m: datetime.strptime(m + "-01", "%Y-%m-%d").strftime("%b %Y") for m in months}
+    units = ["__ALL__"] + [u for u in UNIT_ORDER_REST if u in seen]
+    return {"weeks": weeks, "week_label": wl, "months": months, "month_label": ml, "units": units}
+
+
+_ui = (feeds_by_id.get("lpv") or {}).get("ui") or _derive_ui(feeds)
+weeks = _ui["weeks"]
+week_label = _ui["week_label"]
+months = _ui["months"]
+month_label = _ui["month_label"]
+units = _ui["units"]
 
 # ----------------------------------------------------------------------------
 # 3. Tile illustrations / icons (downscale + base64-embed; SVG fallback) + brand logo
@@ -540,34 +454,34 @@ def feed_rate(feed, key, u="__ALL__", pk="all"):
 
 payload_dump = json.dumps(payload)
 checks = {
-    "Vt<=8 all-units/all-time ~ 83%": 0.78 < feed_rate(lpv_feed, "vt8") < 0.88,
-    "Plateau ~ 85.8%": 0.83 < feed_rate(lpv_feed, "plat") < 0.89,
-    "∆P ~ 48%": 0.44 < feed_rate(lpv_feed, "dp") < 0.52,
-    "Vt<=8 severe computed": lpv_feed["segments"][2]["cells"]["__ALL__"]["all"]["den"] >= 0,
-    "LPV feed links to lpv_dashboard.html": lpv_feed["detail_href"] == "lpv_dashboard.html",
     "tile order has 5 slots": len(TILE_ORDER) == 5,
     "scorecard.html written into dashboard/": out_path.exists() and out_path.parent.name == "dashboard",
+    "at least one real feed loaded": len(feeds) >= 1,
     "no hospitalization_id in payload": "hospitalization_id" not in payload_dump,
     "no patient_id in payload": "patient_id" not in payload_dump,
 }
-
-# Proning (and any external feed) sanity, only if loaded.
+for f in feeds:
+    checks[f"{f['metric_id']}: detail link resolves"] = (
+        f.get("detail_href") is None or (DASH_DIR / f["detail_href"]).exists())
+if "lpv" in feeds_by_id:
+    lf = feeds_by_id["lpv"]
+    checks["lpv Vt headline ~ 83%"] = 0.78 < feed_rate(lf, "vt8") < 0.88
+    checks["lpv Plateau ~ 85.8%"] = 0.83 < feed_rate(lf, "plat") < 0.89
+    checks["lpv dP ~ 48%"] = 0.44 < feed_rate(lf, "dp") < 0.52
 if "proning" in feeds_by_id:
-    pf = feeds_by_id["proning"]
-    hc = pf["headline"]["cells"]["__ALL__"]["all"]
+    hc = feeds_by_id["proning"]["headline"]["cells"]["__ALL__"]["all"]
     checks["proning feed: 0 <= num <= den, den>0"] = 0 <= hc["num"] <= hc["den"] and hc["den"] > 0
-    checks["proning detail copied into dashboard/"] = (
-        pf.get("detail_href") is None or (DASH_DIR / pf["detail_href"]).exists())
-    print(f"  proning headline: {hc['num']}/{hc['den']} = {hc['num']/hc['den']*100:.1f}% ever proned")
-else:
-    print("  (no proning feed loaded — add its path to config 'scorecard_tiles')")
+    print(f"  proning headline: {hc['num']}/{hc['den']} = {hc['num'] / hc['den'] * 100:.1f}% ever proned")
 
 for k, v in checks.items():
     print(f"  [{'ok' if v else 'XX'}] {k}")
-print(f"\n  All-units/all-time: Vt≤{cut} {feed_rate(lpv_feed,'vt8')*100:.1f}% · "
-      f"Plateau {feed_rate(lpv_feed,'plat')*100:.1f}% · ∆P {feed_rate(lpv_feed,'dp')*100:.1f}% · "
-      f"Vt≤{cut} severe {feed_rate(lpv_feed,'vt8sev')*100:.1f}%")
-print(f"  feeds: {[f['metric_id'] for f in feeds]} · weeks: {len(weeks)} ({weeks[0]} → {weeks[-1]}) · units: {len(units)}")
+if "lpv" in feeds_by_id:
+    lf = feeds_by_id["lpv"]
+    print(f"\n  LPV all-units/all-time: Vt {feed_rate(lf, 'vt8') * 100:.1f}% · "
+          f"Plateau {feed_rate(lf, 'plat') * 100:.1f}% · dP {feed_rate(lf, 'dp') * 100:.1f}% · "
+          f"Vt-severe {feed_rate(lf, 'vt8sev') * 100:.1f}%")
+_wk = f"weeks: {len(weeks)} ({weeks[0]} -> {weeks[-1]})" if weeks else "weeks: 0"
+print(f"  feeds: {[f['metric_id'] for f in feeds]} · {_wk} · units: {len(units)}")
 print(f"  bundle dir: {DASH_DIR}  contents: {sorted(p.name for p in DASH_DIR.glob('*.html'))}")
 assert all(checks.values()), "VERIFICATION FAILED"
 print("\nAll checks passed. Done.")

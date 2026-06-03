@@ -1,21 +1,25 @@
 #!/usr/bin/env bash
 #
-# run_pipeline.sh — build the LPV adherence dashboard end-to-end.
+# run_bundle.sh — build the ICU ventilator-QI bundle end-to-end.
 #
-# Runs the pipeline steps in order using the project virtualenv:
-#   01_cohort.py     -> output/01_cohort_patient_days.parquet
-#   02_features.py   -> output/02_patient_day_status.parquet, 02_intervals.parquet
-#   02d_severity.py  -> output/02d_severity.parquet  (severe respiratory failure flag)
-#   03_aggregate.py  -> output/03_*_unit_summary.parquet, 03_vt_grid_*.parquet
-#   04_dashboard.py  -> output/dashboard/lpv_dashboard.html   (LPV drill-down)
-#   05_scorecard.py  -> output/dashboard/scorecard.html        (QI bundle scorecard — open this;
-#                       also copies each config `scorecard_tiles` detail dashboard into output/dashboard/)
+# Runs the LPV metric pipeline, then the scorecard combiner, using the project virtualenv:
+#   metrics/lpv/code/01_cohort.py    -> metrics/lpv/output/01_cohort_patient_days.parquet
+#   metrics/lpv/code/02_features.py  -> metrics/lpv/output/02_patient_day_status.parquet, 02_intervals.parquet
+#   metrics/lpv/code/02d_severity.py -> metrics/lpv/output/02d_severity.parquet
+#   metrics/lpv/code/03_aggregate.py -> metrics/lpv/output/03_*_unit_summary.parquet, 03_vt_grid_*.parquet
+#   metrics/lpv/code/04_dashboard.py -> metrics/lpv/output/final/lpv_dashboard.html
+#   metrics/lpv/code/05_tile_feed.py -> metrics/lpv/output/final/tile_feed_lpv.json
+#   scorecard/build_scorecard.py     -> output/dashboard/scorecard.html
+#       (collects every metric listed in config 'metrics' from metrics/<id>/output/final/ — open this)
+#
+# Other metrics (proning, sat, ...) are their own pipelines under metrics/<id>/; run those in their
+# own dir when their data updates. The combiner just collects whatever feeds already exist.
 #
 # Prereqs (see README.md): a .venv with requirements installed, and a config.json
 # (copy config.example.json -> config.json and edit it for your site).
 #
 # Usage:
-#   ./run_pipeline.sh
+#   ./run_bundle.sh
 #
 set -euo pipefail
 
@@ -39,6 +43,7 @@ steps=(
   "metrics/lpv/code/02d_severity.py"
   "metrics/lpv/code/03_aggregate.py"
   "metrics/lpv/code/04_dashboard.py"
+  "metrics/lpv/code/05_tile_feed.py"
   "scorecard/build_scorecard.py"
 )
 

@@ -11,8 +11,8 @@ recomputes adherence over the interval data. Plateau<=30 & dP<=15 are fixed.
 Inputs:  output/03_monthly_unit_summary.parquet, 03_vt_grid_monthly.parquet,
          03_vt_grid_daily_allunits.parquet, 02_intervals.parquet,
          02_patient_day_status.parquet, 02_features_summary.json, 03_aggregate_summary.json
-Output:  output/dashboard/lpv_dashboard.html   (+ cached output/_vendor/plotly.min.js)
-         (output/dashboard/ is the shippable bundle: scorecard.html + the per-metric drill-downs)
+Output:  metrics/lpv/output/final/lpv_dashboard.html   (+ cached metrics/lpv/output/_vendor/plotly.min.js)
+         (the bundle scorecard collects this drill-down into output/dashboard/ alongside scorecard.html)
 
 Run:
     .venv/bin/python code/04_dashboard.py
@@ -38,7 +38,7 @@ SITE = CFG.get("site", "Your Site")
 CLIF_VER = CFG.get("clif_version", "2.x")
 VENDOR = OUT_DIR / "_vendor"            # build-time cache only (Plotly is inlined into the HTML)
 VENDOR.mkdir(parents=True, exist_ok=True)
-DASH_DIR = ROOT / "output" / "dashboard"  # shared shippable bundle (scorecard + all metric drill-downs)
+DASH_DIR = _METRIC_ROOT / "output" / "final"  # this metric's publishable drill-down (the combiner ships it)
 DASH_DIR.mkdir(parents=True, exist_ok=True)
 
 PLOTLY_URL = "https://cdn.plot.ly/plotly-2.35.2.min.js"
