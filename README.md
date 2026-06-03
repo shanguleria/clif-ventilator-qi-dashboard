@@ -13,7 +13,15 @@ produce their own dashboard. It is **descriptive epidemiology only** — no outc
 
 ## What it produces
 
-A single file — `output/04_lpv_dashboard.html` (~6 MB, Plotly inlined, works offline) — with four tabs:
+The build writes a self-contained, shippable bundle to **`output/dashboard/`**:
+
+- **`scorecard.html`** — the glanceable ICU ventilator-QI bundle scorecard (open this).
+- **`lpv_dashboard.html`** — the detailed LPV drill-down (the scorecard's LPV tile links here).
+- plus a copy of any external metric's detail dashboard (e.g. `proning_dashboard.html`).
+
+The whole `output/dashboard/` folder travels together (the HTML files cross-link by relative name).
+
+`lpv_dashboard.html` (~8 MB, Plotly inlined, works offline) has four tabs:
 
 - **Tidal Volume** — adherence to a tunable Vt/kg cutoff, with a slider (4–10 mL/kg) and time trends.
 - **Component breakdown** — the three components reported **separately, each on its own denominator**.
@@ -83,7 +91,7 @@ cp config.example.json config.json
 ./run_pipeline.sh
 
 # 5. Open the scorecard (the LPV tile links to the detailed dashboard)
-open output/05_scorecard.html                 # macOS  (Linux: xdg-open)
+open output/dashboard/scorecard.html          # macOS  (Linux: xdg-open)
 ```
 
 ### `config.json`
@@ -95,7 +103,8 @@ open output/05_scorecard.html                 # macOS  (Linux: xdg-open)
 | `timezone` | Your site's local tz (e.g. `US/Central`) — used for calendar-day binning |
 | `site` | Your site label — appears in the dashboard title (display only) |
 | `clif_version` | Your CLIF version string (display only) |
-| `output_path` | Where artifacts are written (default `output/`) |
+| `output_path` | Where artifacts are written (default `output/`); the shippable bundle lands in `output/dashboard/` |
+| `scorecard_tiles` | Optional list of external `tile_feed_<metric>.json` paths (relative to repo root or absolute) to ingest as extra scorecard tiles, e.g. `["../proning/output/final/tile_feed_proning.json"]`. Empty `[]` = LPV tile only |
 
 `config.json` is **gitignored** so your data path stays local; commit only `config.example.json`.
 
@@ -111,18 +120,30 @@ open output/05_scorecard.html                 # macOS  (Linux: xdg-open)
 | 2 | `code/02_features.py` | `02_patient_day_status.parquet`, `02_intervals.parquet` — per-component adherence |
 | 2d | `code/02d_severity.py` | `02d_severity.parquet` — severe-respiratory-failure flag per patient-day |
 | 3 | `code/03_aggregate.py` | `03_*_unit_summary.parquet`, `03_vt_grid_*.parquet` — (time × unit, severity) rollups + Vt grid |
-| 4 | `code/04_dashboard.py` | `04_lpv_dashboard.html` — the detailed LPV drill-down dashboard |
-| 5 | `code/05_scorecard.py` | **`05_scorecard.html`** — the CLIF ICU ventilator-QI scorecard (open this; LPV tile → the drill-down) |
+| 4 | `code/04_dashboard.py` | `dashboard/lpv_dashboard.html` — the detailed LPV drill-down dashboard |
+| 5 | `code/05_scorecard.py` | **`dashboard/scorecard.html`** — the CLIF ICU ventilator-QI scorecard (open this; LPV tile → the drill-down). Also copies each `scorecard_tiles` detail dashboard into `dashboard/` |
 
 ### Scorecard
 
-`05_scorecard.html` is a glanceable QI bundle scorecard in the CLIF house style, filterable by **ICU unit** and by
-**month or week** (mutually exclusive). The **LPV tile** (real) shows tidal-volume adherence at
+`dashboard/scorecard.html` is a glanceable QI bundle scorecard in the CLIF house style, filterable by **ICU unit**
+and by **month or week** (mutually exclusive). The **LPV tile** (real) shows tidal-volume adherence at
 ≤ `SCORECARD_VT_CUTOFF` mL/kg (default 8) with a goal bar and a 3-segment mini-indicator (Plateau ≤30 · ∆P ≤15 ·
-Vt in *severe* patients), and links to the detailed dashboard. **SAT, SBT, ARDS proning, and mobilization are
-styled placeholders** for the rest of the ICU-liberation bundle. Headline metric, goal, and cutoff are named
-constants in `code/05_scorecard.py`. Ship `05_scorecard.html` and `04_lpv_dashboard.html` together (the tile links
-between them).
+Vt in *severe* patients), and links to the detailed dashboard. Headline metric, goal, and cutoff are named
+constants in `code/05_scorecard.py`.
+
+The scorecard is **registry-driven**: it is a *combiner*, not a place to add metric logic. Each metric is its own
+pipeline (often its own repo) that emits a small, PHI-free **`tile_feed_<metric>.json`** (schema in
+`plans/02_scorecard_tile_contract.md`). The LPV tile is built in-memory here; every other tile is read from the
+paths listed in `config.json` → `scorecard_tiles`. For each external feed the build validates it, renders it through
+the **same tile component** (donut + up to 3 segments + optional goal bar + sparkline), and **copies its detail
+dashboard into `output/dashboard/`** so the tile's "View details →" link resolves. A coarse feed (e.g. proning is
+site-wide / all-time only) automatically shows a **`· site-wide` / `· all-time` badge** when the global Unit/Week
+filters are finer than the feed provides, so a number is never silently mislabeled. A slot with no feed renders a
+styled **"Not yet computed"** placeholder, so the scorecard always builds.
+
+So adding a metric (SAT, SBT, mobilization, …) is: *build the vertical → emit a tile feed → add one path to
+`scorecard_tiles`* — no scorecard code change. Ship the whole `output/dashboard/` folder together (the HTML files
+cross-link by relative name).
 
 Tile artwork is read from `references/images/<LPV|SAT|SBT|Proning|Mobilization>.png` (downscaled + embedded at build
 time); that folder is gitignored, and the scorecard **falls back to inline SVG icons** when the images are absent —
@@ -181,10 +202,11 @@ charts plateau less often, widen it. Re-run `run_pipeline.sh` after any change.
 ```
 config.example.json   # copy to config.json and edit
 requirements.txt
-run_pipeline.sh        # one-command build (01 -> 04)
+run_pipeline.sh        # one-command build (01 -> 05)
 code/                  # pipeline + data-quality probes
 plans/01_design.md     # authoritative methodology / locked analytic choices
 output/                # generated artifacts (gitignored)
+output/dashboard/      #   └─ the shippable bundle: scorecard.html + the per-metric drill-downs
 ```
 
 ## Acknowledgements

@@ -7,8 +7,9 @@
 #   02_features.py   -> output/02_patient_day_status.parquet, 02_intervals.parquet
 #   02d_severity.py  -> output/02d_severity.parquet  (severe respiratory failure flag)
 #   03_aggregate.py  -> output/03_*_unit_summary.parquet, 03_vt_grid_*.parquet
-#   04_dashboard.py  -> output/04_lpv_dashboard.html   (LPV drill-down)
-#   05_scorecard.py  -> output/05_scorecard.html              (QI bundle scorecard — open this)
+#   04_dashboard.py  -> output/dashboard/lpv_dashboard.html   (LPV drill-down)
+#   05_scorecard.py  -> output/dashboard/scorecard.html        (QI bundle scorecard — open this;
+#                       also copies each config `scorecard_tiles` detail dashboard into output/dashboard/)
 #
 # Prereqs (see README.md): a .venv with requirements installed, and a config.json
 # (copy config.example.json -> config.json and edit it for your site).
@@ -50,4 +51,5 @@ for step in "${steps[@]}"; do
 done
 
 echo ""
-echo "Done. Open the QI scorecard:  output/05_scorecard.html   (LPV tile → output/04_lpv_dashboard.html)"
+echo "Done. Open the QI scorecard:  output/dashboard/scorecard.html"
+echo "  (the whole output/dashboard/ folder is the shippable bundle: scorecard + per-metric drill-downs)"

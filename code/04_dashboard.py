@@ -11,7 +11,8 @@ recomputes adherence over the interval data. Plateau<=30 & dP<=15 are fixed.
 Inputs:  output/03_monthly_unit_summary.parquet, 03_vt_grid_monthly.parquet,
          03_vt_grid_daily_allunits.parquet, 02_intervals.parquet,
          02_patient_day_status.parquet, 02_features_summary.json, 03_aggregate_summary.json
-Output:  output/04_lpv_dashboard.html   (+ cached output/_vendor/plotly.min.js)
+Output:  output/dashboard/lpv_dashboard.html   (+ cached output/_vendor/plotly.min.js)
+         (output/dashboard/ is the shippable bundle: scorecard.html + the per-metric drill-downs)
 
 Run:
     .venv/bin/python code/04_dashboard.py
@@ -34,8 +35,10 @@ CFG = json.loads((ROOT / "config.json").read_text())
 OUT_DIR = Path(CFG.get("output_path", ROOT / "output"))
 SITE = CFG.get("site", "Your Site")
 CLIF_VER = CFG.get("clif_version", "2.x")
-VENDOR = OUT_DIR / "_vendor"
+VENDOR = OUT_DIR / "_vendor"            # build-time cache only (Plotly is inlined into the HTML)
 VENDOR.mkdir(parents=True, exist_ok=True)
+DASH_DIR = OUT_DIR / "dashboard"        # the shippable, cross-linked HTML bundle
+DASH_DIR.mkdir(parents=True, exist_ok=True)
 
 PLOTLY_URL = "https://cdn.plot.ly/plotly-2.35.2.min.js"
 UNIT_ORDER_REST = ["medical_icu", "mixed_cardiothoracic_icu", "surgical_icu",
@@ -796,7 +799,7 @@ monthSel.disabled = weekSel.disabled = true;
 setText(); setHeaderAndTable();
 var initId=(location.hash||"#p-vt").slice(1);
 // Strip any incoming fragment BEFORE load completes so the browser's load-time
-// "scroll to fragment" can't fire (e.g. arriving at 04_lpv_dashboard.html#p-comp).
+// "scroll to fragment" can't fire (e.g. arriving at lpv_dashboard.html#p-comp).
 try{ history.replaceState(null, '', location.pathname+location.search); }catch(e){}
 showPanel(initId, false);          // select + draw, but do NOT write the hash on init
 // Backstop: re-assert the top after the browser's own load / anchor / bfcache scrolling,
@@ -828,7 +831,7 @@ BODY = f"""
   <div class="brandrow">
     {f'<img class="logo" src="{LOGO_IMG}" alt="CLIF">' if LOGO_IMG else ''}
     <div class="titleblock">
-      <a class="backlink" href="05_scorecard.html">← CLIF ICU Ventilator QI Bundle</a>
+      <a class="backlink" href="scorecard.html">← CLIF ICU Ventilator QI Bundle</a>
       <h1>Lung-Protective Ventilation Adherence — {SITE}</h1>
       <p class="sub" id="cohort-line">{ch['n_patient_days']:,} IMV-on-ICU patient-days · {ch['n_hosps']:,} hospitalizations · {ch['n_patients']:,} patients (all time)</p>
       <p class="sub" style="margin-top:1px">{ch['day_min']} → {ch['day_max']} · Descriptive; component-separated, each measure on its own denominator.</p>
@@ -928,7 +931,7 @@ HTML = (HTML.replace("@@CSS@@", CSS)
         .replace("@@PAYLOAD@@", json.dumps(payload, allow_nan=False))
         .replace("@@APPJS@@", APP_JS))
 
-out_html = OUT_DIR / "04_lpv_dashboard.html"
+out_html = DASH_DIR / "lpv_dashboard.html"
 out_html.write_text(HTML)
 size_mb = out_html.stat().st_size / 1e6
 print(f"\nWrote {out_html}  ({size_mb:.1f} MB)")
