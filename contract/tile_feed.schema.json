@@ -1,0 +1,94 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/shanguleria/clif-ventilator-qi-dashboard/contract/tile_feed.schema.json",
+  "title": "CLIF ventilator-QI scorecard tile feed (v1)",
+  "description": "One PHI-free, pre-aggregated feed per metric vertical. Renders one scorecard tile AND is the per-site federated submission unit (counts pool as Sum(num)/Sum(den)). See tile_feed_contract.md.",
+  "type": "object",
+  "required": ["schema_version", "metric_id", "title", "grain", "headline"],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {"const": 1},
+    "metric_id": {"type": "string", "pattern": "^[a-z0-9_]+$",
+      "description": "Unique slug; also the registry key + placeholder it replaces (lpv, proning, sat, ...)."},
+    "title": {"type": "string"},
+    "subtitle": {"type": "string", "description": "Grey one-liner (the headline definition)."},
+    "icon": {"type": "string", "enum": ["lpv", "sat", "sbt", "prone", "mob"]},
+    "detail_href": {"type": ["string", "null"],
+      "description": "Filename of the metric's detail dashboard, shipped next to the feed; the combiner copies it into output/dashboard/."},
+    "goal": {"type": ["number", "null"], "minimum": 0, "maximum": 1,
+      "description": "Target fraction (draws a goal bar); null = no goal bar."},
+    "note": {"type": ["string", "null"], "description": "Optional caption under the tile (e.g. a coverage caveat)."},
+    "generated": {"type": "string", "description": "ISO timestamp (kept top-level for back-compat; also in provenance)."},
+
+    "grain": {
+      "type": "object",
+      "required": ["units", "periods"],
+      "properties": {
+        "units": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+          "description": "Unit keys provided. [\"__ALL__\"] = site-wide only."},
+        "periods": {"type": "array", "items": {"enum": ["all", "month", "week"]}, "minItems": 1}
+      }
+    },
+
+    "headline": {
+      "type": "object",
+      "required": ["cells"],
+      "properties": {
+        "label": {"type": "string"},
+        "den_label": {"type": "string"},
+        "n_unit": {"type": "string"},
+        "cells": {"$ref": "#/$defs/cellMap"}
+      }
+    },
+
+    "segments": {
+      "type": "array", "maxItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["key", "label", "cells"],
+        "properties": {
+          "key": {"type": "string"},
+          "label": {"type": "string"},
+          "cells": {"$ref": "#/$defs/cellMap"}
+        }
+      }
+    },
+
+    "ui": {"type": "object", "description": "Renderer hints for the combiner's global selectors (finest-grained feed only)."},
+
+    "provenance": {
+      "type": "object",
+      "description": "Pooling-ready metadata. Optional for local rendering; REQUIRED for consortium submission.",
+      "required": ["site_id", "definition_version"],
+      "properties": {
+        "site_id": {"type": "string", "description": "Internal site label; the coordinating center anonymizes to 'Site N'."},
+        "code_version": {"type": ["string", "null"], "description": "Bundle git SHA at run time."},
+        "clif_version": {"type": ["string", "null"]},
+        "definition_version": {"type": "string", "description": "Bumps only when eligibility/denominator changes; sites must share it to be pooled."},
+        "generated": {"type": "string"}
+      }
+    }
+  },
+
+  "$defs": {
+    "cell": {
+      "type": "object",
+      "required": ["num", "den"],
+      "properties": {
+        "num": {"type": "integer", "minimum": 0},
+        "den": {"type": "integer", "minimum": 0},
+        "n": {"type": "integer", "minimum": 0},
+        "hrs": {"type": "number", "minimum": 0}
+      },
+      "description": "Counts only — rate = num/den. Never pre-divided (so it pools across sites)."
+    },
+    "cellMap": {
+      "type": "object",
+      "description": "cells[unitKey][periodKey] -> cell. periodKey is 'all' | 'YYYY-MM' | 'YYYY-Www'.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": {"$ref": "#/$defs/cell"}
+      }
+    }
+  }
+}

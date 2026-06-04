@@ -1,0 +1,11 @@
+# CODEOWNERS — currently solo, so everything defaults to the repo owner.
+#
+# When collaborators join, uncomment and assign per-metric owners. Each metric vertical is
+# self-contained, so this keeps the bundle loosely coupled — a metric can even be split back out
+# to its own repo later (the tile-feed contract is all the scorecard depends on).
+#
+# /metrics/lpv/      @shanguleria
+# /metrics/proning/  @shanguleria
+# /metrics/sat/      @shanguleria
+# /scorecard/        @shanguleria
+# /contract/         @shanguleria

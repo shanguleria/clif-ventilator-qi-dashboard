@@ -11,8 +11,8 @@ recomputes adherence over the interval data. Plateau<=30 & dP<=15 are fixed.
 Inputs:  output/03_monthly_unit_summary.parquet, 03_vt_grid_monthly.parquet,
          03_vt_grid_daily_allunits.parquet, 02_intervals.parquet,
          02_patient_day_status.parquet, 02_features_summary.json, 03_aggregate_summary.json
-Output:  output/dashboard/lpv_dashboard.html   (+ cached output/_vendor/plotly.min.js)
-         (output/dashboard/ is the shippable bundle: scorecard.html + the per-metric drill-downs)
+Output:  metrics/lpv/output/final/lpv_dashboard.html   (+ cached metrics/lpv/output/_vendor/plotly.min.js)
+         (the bundle scorecard collects this drill-down into output/dashboard/ alongside scorecard.html)
 
 Run:
     .venv/bin/python code/04_dashboard.py
@@ -30,14 +30,15 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[3]            # bundle root (shared config.json)
+_METRIC_ROOT = Path(__file__).resolve().parents[1]    # metrics/lpv (per-metric outputs)
 CFG = json.loads((ROOT / "config.json").read_text())
-OUT_DIR = Path(CFG.get("output_path", ROOT / "output"))
+OUT_DIR = Path(CFG.get("output_path", _METRIC_ROOT / "output"))
 SITE = CFG.get("site", "Your Site")
 CLIF_VER = CFG.get("clif_version", "2.x")
 VENDOR = OUT_DIR / "_vendor"            # build-time cache only (Plotly is inlined into the HTML)
 VENDOR.mkdir(parents=True, exist_ok=True)
-DASH_DIR = OUT_DIR / "dashboard"        # the shippable, cross-linked HTML bundle
+DASH_DIR = _METRIC_ROOT / "output" / "final"  # this metric's publishable drill-down (the combiner ships it)
 DASH_DIR.mkdir(parents=True, exist_ok=True)
 
 PLOTLY_URL = "https://cdn.plot.ly/plotly-2.35.2.min.js"
@@ -440,7 +441,7 @@ print(f"[5] Plotly inlined ({len(plotly_js)/1e6:.1f} MB)")
 import base64
 from io import BytesIO
 
-IMG_DIR = ROOT / "references" / "images"
+IMG_DIR = ROOT / "assets"
 
 
 def _load_logo(stem="clif_logo_v2", px=480):

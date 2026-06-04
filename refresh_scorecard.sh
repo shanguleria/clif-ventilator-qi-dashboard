@@ -2,14 +2,14 @@
 #
 # refresh_scorecard.sh — re-render the QI bundle scorecard ONLY (no CLIF re-read).
 #
-# Runs just step 05, which is registry-driven: it reads every feed listed in
-# config.json -> scorecard_tiles (e.g. ../proning/..., ../Sedation/sat_dashboard/...),
-# validates each (schema_version == 1 + PHI-free), copies each feed's detail dashboard
-# into output/dashboard/ so its "View details ->" link resolves, and rebuilds
-# output/dashboard/scorecard.html. Reuses the existing output/*.parquet artifacts, so it
-# is fast and safe to run anytime a sibling repo re-emits its tile feed.
+# Re-emits the LPV tile feed from the existing parquets, then runs the scorecard combiner, which
+# collects every metric in config.json -> metrics (each at metrics/<id>/output/final/tile_feed_<id>.json),
+# validates each (schema_version == 1 + PHI-free), copies each feed's detail dashboard into
+# output/dashboard/ so its "View details ->" link resolves, and rebuilds output/dashboard/scorecard.html.
+# Reuses the existing metrics/lpv/output/*.parquet artifacts (no CLIF re-read), so it is fast and safe
+# to run anytime a metric re-emits its tile feed.
 #
-# To rebuild the underlying LPV data first, run ./run_pipeline.sh (01 -> 05) instead.
+# To rebuild the underlying LPV data first, run ./run_bundle.sh (01 -> scorecard) instead.
 #
 # Usage:
 #   ./refresh_scorecard.sh
@@ -29,13 +29,14 @@ if [[ ! -f config.json ]]; then
   echo "    cp config.example.json config.json   # then set clif_data_path, site, timezone"
   exit 1
 fi
-if [[ ! -f output/02_patient_day_status.parquet ]]; then
-  echo "ERROR: output/02_patient_day_status.parquet not found — the LPV pipeline hasn't been built."
-  echo "    Run the full pipeline first:  ./run_pipeline.sh"
+if [[ ! -f metrics/lpv/output/02_patient_day_status.parquet ]]; then
+  echo "ERROR: metrics/lpv/output/02_patient_day_status.parquet not found — the LPV pipeline hasn't been built."
+  echo "    Run the full pipeline first:  ./run_bundle.sh"
   exit 1
 fi
 
-"$PY" code/05_scorecard.py
+"$PY" metrics/lpv/code/05_tile_feed.py    # re-emit the LPV feed from current parquets (no CLIF read)
+"$PY" scorecard/build_scorecard.py        # collect every metric feed + rebuild scorecard.html
 
 echo ""
 echo "Done. Open the QI scorecard:  output/dashboard/scorecard.html"
