@@ -124,17 +124,18 @@ code/
   sbt_detect.py             # UTIL: controlled-hour accrual, stability screen, trach flag, transitions
   00_probe_documentation.py # quantify-first coverage probe (aggregates only; run on demand)
   01_build_cohort.py        # ventilated-ICU patient-DAYS (reuses SAT's warm waterfall cache)
-  02_sbt_eligibility.py     # >=12h controlled + >=2h stable + non-trach -> eligible/not/not_assessable
-  03_sbt_observation.py     # controlled->support transition detection (numerator)
+  02_sbt_eligibility.py     # >=12h controlled + >=2h stable + non-trach + non-paralytic -> eligible/...
+  03_sbt_observation.py     # 3 numerators + per-episode durations + per-day spont-minutes
   04_metrics.py             # rates + unit/period slices + site summary + tile feed
-  05_dashboard.py           # interactive maroon/cream HTML dashboard
+  05_dashboard.py           # interactive maroon/cream HTML dashboard (toggles, decomp, duration panel)
 output/
   intermediate/
-    _cache/                 # checkpoints (seeded from SAT: stitched adt/hosp/mapping, resp waterfall)
+    _cache/                 # checkpoints (own full ICU∩IMV waterfall; seed_cache_from=null)
     cohort.parquet          # ventilated-ICU patient-days
     sbt_eligibility.parquet
     sbt_observation.parquet
-    metrics_patient_day_level.parquet   # per-day detail + unit/period keys (keeps ids; not shared)
+    sbt_durations.parquet   # per-transition-episode durations (PHI-free: unit/icu_day/dur_min/arm)
+    metrics_patient_day_level.parquet   # per-day detail + unit/period keys + spont_minutes (keeps ids; not shared)
     metrics_slices.parquet
   final/
     cohort_flow.csv         # CONSORT-like counts (vent-days -> non-trach -> eligible -> SBT)

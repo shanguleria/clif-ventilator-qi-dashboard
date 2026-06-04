@@ -293,6 +293,52 @@ def build_slices_js(slices: pd.DataFrame) -> dict:
     return out
 
 
+def build_duration_payload(durs: pd.DataFrame, obs: pd.DataFrame) -> tuple[dict, dict]:
+    """Compact, PHI-free arrays for the duration panel, binned live in JS.
+
+    episodes = per controlled→support transition (the SBT duration, minutes).
+    spont    = per on-spontaneous day (total minutes on a support mode that day).
+    Each record carries duration + unit/month/week INDICES so JS filters by the same
+    Unit/Time/Period selectors. No patient/encounter ids.
+    """
+    epi = durs.copy()
+    if not epi.empty:
+        epi["icu_day"] = epi["icu_day"].astype(str)
+        epi["mon"] = epi["icu_day"].str.slice(0, 7)
+        d = pd.to_datetime(epi["icu_day"], errors="coerce")
+        iso = d.dt.isocalendar()
+        epi["wk"] = (iso["year"].astype("Int64").astype(str) + "-W"
+                     + iso["week"].astype("Int64").astype(str).str.zfill(2))
+        epi["unit"] = epi["unit"].astype("string").fillna("unknown").replace("", "unknown")
+        epi["val"] = pd.to_numeric(epi["dur_min"], errors="coerce").fillna(0.0)
+    sp = obs.loc[obs["on_spontaneous"], ["unit", "period_month", "period_week", "spont_minutes"]].copy()
+    sp = sp.rename(columns={"period_month": "mon", "period_week": "wk", "spont_minutes": "val"})
+    sp["unit"] = sp["unit"].astype("string").fillna("unknown").replace("", "unknown")
+    sp["val"] = pd.to_numeric(sp["val"], errors="coerce").fillna(0.0)
+
+    def _vals(s):
+        return sorted(set(s.dropna().tolist()))
+    units = _vals(pd.concat([epi.get("unit", pd.Series(dtype=str)), sp["unit"]]))
+    months = _vals(pd.concat([epi.get("mon", pd.Series(dtype=str)), sp["mon"]]))
+    weeks = _vals(pd.concat([epi.get("wk", pd.Series(dtype=str)), sp["wk"]]))
+    uidx = {u: i for i, u in enumerate(units)}
+    midx = {m: i for i, m in enumerate(months)}
+    widx = {w: i for i, w in enumerate(weeks)}
+
+    def pack(df):
+        if df.empty:
+            return {"dur": [], "u": [], "m": [], "w": []}
+        return {"dur": [int(round(x)) for x in df["val"].tolist()],
+                "u": [uidx[u] for u in df["unit"].tolist()],
+                "m": [midx.get(m, -1) for m in df["mon"].tolist()],
+                "w": [widx.get(w, -1) for w in df["wk"].tolist()]}
+
+    DUR = {"episodes": pack(epi if not epi.empty else pd.DataFrame(columns=["val", "unit", "mon", "wk"])),
+           "spont": pack(sp)}
+    DURCFG = {"units": units, "months": months, "weeks": weeks}
+    return DUR, DURCFG
+
+
 FILTER_JS = r"""
 (function(){
   const $ = id => document.getElementById(id);
@@ -364,7 +410,7 @@ FILTER_JS = r"""
       $("hd-sub").textContent = "no " + (state.den === "elig" ? "eligible" : "vent-ICU") + " days · " + ctx;
       $("ptline").textContent = "";
       drawDonut(null, false);
-      $("smallnote").style.display = "none"; drawDecomp(null); drawTrend(); drawUnits(); return;
+      $("smallnote").style.display = "none"; drawDecomp(null); drawTrend(); drawUnits(); drawDurations(); return;
     }
     const small = denVal(c) < min;
     const frac = fracOf(c);
@@ -376,7 +422,80 @@ FILTER_JS = r"""
       + " patients (" + pct(pd ? pn/pd : null) + ") " + nspec.ever + ".") : "";
     drawDonut(frac, small);
     $("smallnote").style.display = small ? "block" : "none";
-    drawDecomp(c); drawTrend(); drawUnits();
+    drawDecomp(c); drawTrend(); drawUnits(); drawDurations();
+  }
+
+  // ---- duration histogram + percentile table (per-trial; per-day for spontaneous) ----
+  const DBUCK = [0, 5, 15, 30, 60, 120, 240, 480, Infinity];
+  const DBLAB = ["<5m", "5–15m", "15–30m", "30–60m", "1–2h", "2–4h", "4–8h", ">8h"];
+  function durSpec(){
+    if (state.num === "spont") return {ds: DUR.spont, minDur: 0, unit: "days",
+      label: "Time on a Spontaneous Mode (per day)"};
+    if (state.num === "any") return {ds: DUR.episodes, minDur: 0, unit: "trials",
+      label: "SBT Duration — Any (per trial)"};
+    return {ds: DUR.episodes, minDur: 2, unit: "trials",
+      label: "SBT Duration — Strict ≥2 min (per trial)"};
+  }
+  function durValues(){
+    const sp = durSpec(), ds = sp.ds;
+    const selU = state.unit === "__ALL__" ? -1 : DURCFG.units.indexOf(state.unit);
+    let mode = 0, sel = -1;
+    if (!(state.gran === "all" || state.period === "__all__")){
+      if (state.gran === "month"){ mode = 1; sel = DURCFG.months.indexOf(state.period); }
+      else if (state.gran === "week"){ mode = 2; sel = DURCFG.weeks.indexOf(state.period); }
+    }
+    const D = ds.dur, U = ds.u, M = ds.m, W = ds.w, out = [];
+    for (let i = 0; i < D.length; i++){
+      if (D[i] < sp.minDur) continue;
+      if (selU >= 0 && U[i] !== selU) continue;
+      if (mode === 1 && M[i] !== sel) continue;
+      if (mode === 2 && W[i] !== sel) continue;
+      out.push(D[i]);
+    }
+    return out;
+  }
+  function fmtDur(m){ return m == null ? "—" : (m < 60 ? m.toFixed(0) + " min" : (m/60).toFixed(1) + " h"); }
+  function qtile(sorted, q){
+    if (!sorted.length) return null;
+    return sorted[Math.min(sorted.length - 1, Math.round(q * (sorted.length - 1)))];
+  }
+  function drawDurations(){
+    const sp = durSpec(), vals = durValues();
+    const when = (state.gran === "all" || state.period === "__all__") ? "all time" : plabel(state.period);
+    $("durTitle").textContent = sp.label + " · " + CFG.unitLabels[state.unit] + " · " + when;
+    const host = $("durHist"), tbl = $("durTable");
+    if (!vals.length){
+      host.innerHTML = '<div class="muted">No ' + sp.unit + ' in this slice.</div>'; tbl.innerHTML = ""; return;
+    }
+    const n = vals.length;
+    const counts = new Array(DBLAB.length).fill(0);
+    for (const v of vals){
+      let b = DBUCK.length - 2;
+      for (let j = 0; j < DBUCK.length - 1; j++){ if (v < DBUCK[j+1]){ b = j; break; } }
+      counts[b]++;
+    }
+    const maxc = Math.max.apply(null, counts) || 1;
+    const padL = 34, padB = 30, padT = 16, padR = 10, bw = 70, ih = 168;
+    const W = padL + padR + DBLAB.length * bw, H = padT + ih + padB;
+    let svg = '<line x1="'+padL+'" y1="'+padT+'" x2="'+padL+'" y2="'+(padT+ih)+'" stroke="#ece1d9"/>'
+            + '<line x1="'+padL+'" y1="'+(padT+ih)+'" x2="'+(W-padR)+'" y2="'+(padT+ih)+'" stroke="#ece1d9"/>';
+    counts.forEach((c, i) => {
+      const x = padL + i*bw + bw*0.16, w = bw*0.68;
+      const h = ih*(c/maxc), y = padT + ih - h, pc = 100*c/n;
+      const over = (i === DBLAB.length - 1);
+      svg += '<g><title>'+DBLAB[i]+': '+c.toLocaleString()+' ('+pc.toFixed(1)+'%)</title>';
+      svg += '<rect x="'+x+'" y="'+y+'" width="'+w+'" height="'+h+'" fill="'+(over?"#7d8a86":"#8a1f2b")+'" rx="2"/></g>';
+      if (c > 0) svg += '<text x="'+(x+w/2)+'" y="'+(y-3)+'" font-size="9.5" text-anchor="middle" fill="#6b5d57">'+pc.toFixed(0)+'%</text>';
+      svg += '<text x="'+(x+w/2)+'" y="'+(padT+ih+13)+'" font-size="9.5" text-anchor="middle" fill="#6b5d57">'+DBLAB[i]+'</text>';
+    });
+    svg += '<text x="'+(padL-5)+'" y="'+(padT+5)+'" font-size="9" text-anchor="end" fill="#9a8c86">'+maxc.toLocaleString()+'</text>'
+         + '<text x="'+(padL-5)+'" y="'+(padT+ih)+'" font-size="9" text-anchor="end" fill="#9a8c86">0</text>';
+    host.innerHTML = '<svg viewBox="0 0 '+W+' '+H+'" width="'+W+'" height="'+H+'" style="max-width:100%">'+svg+'</svg>';
+    const s = vals.slice().sort((a,b) => a - b);
+    const qs = [["p10",0.10],["p25",0.25],["Median",0.50],["p75",0.75],["p90",0.90]];
+    let head = '<tr><th>'+sp.unit+' (n)</th>', body = '<tr><td>'+n.toLocaleString()+'</td>';
+    for (const [lab, q] of qs){ head += '<th>'+lab+'</th>'; body += '<td>'+fmtDur(qtile(s, q))+'</td>'; }
+    tbl.innerHTML = '<table class="dur-table">'+head+'</tr>'+body+'</tr></table>';
   }
 
   // ---- "Why no SBT?" decomposition over ALL vent-ICU days (follows the numerator) ----
@@ -568,6 +687,12 @@ margin:24px 0 34px;box-shadow:0 3px 10px rgba(120,30,40,.05);}}
 .decompNote{{font-size:13.5px;color:var(--ink);margin-top:12px;line-height:1.65;
 background:var(--cream);border:1px solid var(--line);border-radius:10px;padding:12px 16px;}}
 .decompNote b{{color:var(--maroon-d);}}
+.dur-wrap{{display:flex;flex-wrap:wrap;align-items:flex-start;gap:24px;}}
+.dur-table{{border-collapse:collapse;margin:8px 0 2px;font-size:13px;}}
+.dur-table th{{background:var(--cream);color:var(--maroon-d);font-weight:700;padding:7px 15px;
+border-bottom:2px solid var(--maroon-d);text-align:center;}}
+.dur-table td{{padding:7px 15px;border-bottom:1px solid var(--line);text-align:center;
+font-variant-numeric:tabular-nums;}}
 .controls{{display:flex;flex-wrap:wrap;align-items:flex-end;gap:18px;margin:22px 0 4px;}}
 .ctl{{display:flex;flex-direction:column;gap:5px;font-size:11px;font-weight:700;
 color:var(--muted);text-transform:uppercase;letter-spacing:.04em;}}
@@ -662,6 +787,17 @@ border-top:1px solid var(--line);padding-top:14px;}}
     parentheses; bars are grayed below the small-cell threshold.</div>
   </div>
 
+  <div class="section"><h2>How Long Are the Trials?</h2>
+    <div class="fig-caption" id="durTitle"></div>
+    <div class="dur-wrap"><div class="trend-wrap" id="durHist"></div><div id="durTable"></div></div>
+    <div class="fig-caption">Distribution of <b>SBT durations</b> (per trial — the length of each
+    controlled→support episode) for the Strict / Any-duration numerators, or <b>time on a spontaneous
+    mode per day</b> for the On-spontaneous numerator. Reacts to Unit / Time / Period and the
+    <b>Numerator</b> toggle (independent of the Denominator). The gray <b>&gt;8 h</b> bin is largely
+    sustained support ventilation rather than a discrete trial — a true SBT ends in extubation or a return
+    to a controlled mode. Where charting is hourly a brief trial may be missed entirely (a lower bound).</div>
+  </div>
+
   <div class="section"><h2>Cohort Flow</h2>
     <div class="fig"><img src="{ctx['consort_uri']}" alt="cohort funnel"></div>
     <div class="fig-caption">From ventilated-ICU patient-days to non-tracheostomized days, eligible
@@ -698,6 +834,9 @@ def main() -> None:
     summary = pd.read_csv(final / "metrics_site_summary.csv")
     obs = pd.read_parquet(inter / "metrics_patient_day_level.parquet")
     slices = pd.read_parquet(inter / "metrics_slices.parquet")
+    durs = (pd.read_parquet(inter / "sbt_durations.parquet")
+            if (inter / "sbt_durations.parquet").exists()
+            else pd.DataFrame(columns=["unit", "icu_day", "dur_min", "arm"]))
     diag = {}
     if (inter / "sbt_diag.json").exists():
         diag = _json.loads((inter / "sbt_diag.json").read_text())
@@ -724,8 +863,11 @@ def main() -> None:
               "unitLabels": {u: UNIT_LABELS.get(u, u) for u in slices["unit"].unique()},
               "unitOrder": unit_order,
               "periodLabels": period_labels}
+    dur_payload, dur_cfg = build_duration_payload(durs, obs)
     script_html = ("<script>\nconst SLICES = " + _json.dumps(slices_js, ensure_ascii=False)
                    + ";\nconst CFG = " + _json.dumps(cfg_js, ensure_ascii=False)
+                   + ";\nconst DUR = " + _json.dumps(dur_payload, ensure_ascii=False)
+                   + ";\nconst DURCFG = " + _json.dumps(dur_cfg, ensure_ascii=False)
                    + ";\n" + FILTER_JS + "\n</script>")
 
     import math

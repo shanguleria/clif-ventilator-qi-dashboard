@@ -237,10 +237,11 @@ def build_tile_feed(cfg: dict, m: dict, slices: pd.DataFrame, diag: dict) -> dic
         "generated": m["generated"],
         "note": (f"Eligible = ventilated-ICU days with ≥12h controlled ventilation accrued + a ≥2h "
                  f"stable window (FiO2≤0.50, PEEP≤8, SpO2≥88, norepinephrine-equiv≤0.2 mcg/kg/min), "
-                 f"non-tracheostomized ({cov_pct:.0f}% of non-trach vent-ICU days). SBT = a "
-                 f"controlled→support transition (pressure support/CPAP, PEEP≤8 / CPAP≤5) sustained "
-                 f"≥2 min. {native_clause}delivery is a lower bound where charting is hourly; CPAP "
-                 f"pressure read from PEEP (no CLIF CPAP column). Trached patients excluded."),
+                 f"not tracheostomized and not on a continuous paralytic ({cov_pct:.0f}% of non-trach "
+                 f"vent-ICU days). SBT = a controlled→support transition (pressure support/CPAP, "
+                 f"PEEP≤8 / CPAP≤5) sustained ≥2 min. {native_clause}delivery is a lower bound where "
+                 f"charting is hourly; CPAP pressure read from PEEP (no CLIF CPAP column). Tracheostomized "
+                 f"and continuously-paralyzed patient-days are excluded."),
         "grain": {"units": units, "periods": ["all", "month", "week"]},
         "headline": {
             "label": "SBT delivered",

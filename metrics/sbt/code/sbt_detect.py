@@ -368,6 +368,49 @@ def support_presence_days(wf: pd.DataFrame, days: pd.DataFrame, cfg: dict) -> pd
     return out[["encounter_block", "icu_day", "on_spontaneous"]]
 
 
+def support_minutes_days(wf: pd.DataFrame, days: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    """Per (encounter_block, icu_day): TOTAL minutes on a support mode that day.
+
+    Builds a continuous mode timeline from the waterfall (each row holds until the next
+    row of the block, trailing capped at 1h), keeps support-mode segments, and sums each
+    segment's overlap with the day window. This is the duration measure for the liberal
+    'on a spontaneous mode' view (hours/day on support, no transition required).
+    Returns [encounter_block, icu_day, spont_minutes]."""
+    base = days[["encounter_block", "icu_day", "day_in", "day_out"]].copy()
+    base["encounter_block"] = base["encounter_block"].astype(str)
+    cols = ["encounter_block", "icu_day", "spont_minutes"]
+
+    w = wf.dropna(subset=["encounter_block", "recorded_dttm"]).copy()
+    w["encounter_block"] = w["encounter_block"].astype(str)
+    w = w.sort_values(["encounter_block", "recorded_dttm"])
+    w["seg_end"] = w.groupby("encounter_block")["recorded_dttm"].shift(-1)
+    w["seg_end"] = w["seg_end"].fillna(w["recorded_dttm"] + TRAILING_NATIVE_CAP)
+    supp = w[w["mode_category"].astype("string").str.lower().isin(support_modes(cfg))][
+        ["encounter_block", "recorded_dttm", "seg_end"]].rename(columns={"recorded_dttm": "seg_start"})
+    supp = supp[supp["seg_end"] > supp["seg_start"]]
+    if supp.empty:
+        base["spont_minutes"] = 0.0
+        return base[cols]
+
+    con = duckdb.connect()
+    con.register("d", base)
+    con.register("s", supp)
+    out = con.execute(
+        """
+        SELECT d.encounter_block AS encounter_block, d.icu_day AS icu_day,
+               COALESCE(SUM(epoch(least(s.seg_end, d.day_out) - greatest(s.seg_start, d.day_in))) / 60.0,
+                        0.0) AS spont_minutes
+        FROM d LEFT JOIN s
+          ON d.encounter_block = s.encounter_block
+         AND s.seg_start < d.day_out AND s.seg_end > d.day_in
+        GROUP BY d.encounter_block, d.icu_day
+        """
+    ).fetchdf()
+    con.close()
+    out["spont_minutes"] = out["spont_minutes"].fillna(0.0)
+    return out[cols]
+
+
 # ---------------------------------------------------------------------------
 # F. Continuous paralytic (NMBA) in effect on a patient-day (eligibility exclusion)
 # ---------------------------------------------------------------------------
