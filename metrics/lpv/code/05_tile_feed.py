@@ -15,9 +15,24 @@ Run (after 01-04):  .venv/bin/python metrics/lpv/code/05_tile_feed.py
 from __future__ import annotations
 
 import json
+import subprocess
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+
+DEFINITION_VERSION = "lpv-v1"   # bump ONLY when the eligibility / denominator definition changes
+
+
+def _git_sha():
+    """Short bundle commit for provenance (None outside a git checkout)."""
+    try:
+        out = subprocess.run(["git", "-C", str(Path(__file__).resolve().parents[3]),
+                              "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=5)
+        return out.stdout.strip() or None
+    except Exception:
+        return None
 
 ROOT = Path(__file__).resolve().parents[3]            # bundle root (shared config.json)
 _METRIC_ROOT = Path(__file__).resolve().parents[1]    # metrics/lpv (per-metric outputs)
@@ -149,6 +164,14 @@ lpv_feed = {
     # UI metadata the combiner uses for its global Week/Month/Unit selectors + sparkline axes.
     "ui": {"weeks": weeks, "week_label": week_label,
            "months": months, "month_label": month_label, "units": units},
+    # Provenance (pooling-ready; additive — the combiner ignores it, a coordinating center requires it).
+    "provenance": {
+        "site_id": CFG.get("site", "unknown"),
+        "code_version": _git_sha(),
+        "clif_version": CFG.get("clif_version"),
+        "definition_version": DEFINITION_VERSION,
+        "generated": datetime.now().isoformat(timespec="minutes"),
+    },
 }
 
 out_path = FINAL_DIR / "tile_feed_lpv.json"

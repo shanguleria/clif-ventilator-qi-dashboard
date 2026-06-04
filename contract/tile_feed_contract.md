@@ -187,6 +187,32 @@ emit a conformant `tile_feed_proning.json`.
 
 ---
 
+## 7. Provenance (v1.1 — pooling-ready, additive)
+
+Each feed MAY carry a top-level `provenance` block. The scorecard ignores it; a coordinating center
+REQUIRES it to trust + version what it pools. `schema_version` stays `1` (additive — existing feeds
+keep working).
+
+```jsonc
+"provenance": {
+  "site_id": "UChicago",            // internal label; the center anonymizes to "Site N"
+  "code_version": "0922120",        // bundle git SHA at run time
+  "clif_version": "2.1.0",
+  "definition_version": "lpv-v1",   // bumps only when eligibility/denominator changes
+  "generated": "2026-06-03T18:40"
+}
+```
+
+Pooling rules (recorded so producers emit the right shape; the central aggregator itself is deferred):
+- Pool at **site level** (`__ALL__` cells): `consortium_rate = Σ_site num / Σ_site den`. Per-unit
+  pooling waits on cross-site ICU-taxonomy harmonization.
+- Sites must share a `definition_version` to be pooled together; group by it and flag drift.
+- Real `site_id` stays internal; any per-site display uses anonymized **"Site 1…N"**.
+
+A machine-checkable JSON Schema lives beside this doc at **`contract/tile_feed.schema.json`**.
+
+---
+
 ## Change Log
 - **2026-06-03** — v1 created. Generalizes the existing LPV tile (donut + ≤3 segments + sparkline) into
   a per-metric `tile_feed_<metric>.json`; adds a `grain` declaration + global-filter fallback so coarse
@@ -197,3 +223,9 @@ emit a conformant `tile_feed_proning.json`.
   fallback). Output moved to the shippable bundle `output/dashboard/` (`scorecard.html` +
   `lpv_dashboard.html`); each feed's `detail_href` dashboard is copied into `output/dashboard/`. Proning
   is the first live external tile (ever-proned 350/1854 = 18.9%; PHI-free, coarse grain).
+- **2026-06-03** — repo became the `clif-ventilator-qi-dashboard` monorepo. The combiner is now
+  `scorecard/build_scorecard.py`; it collects each metric in `config.json → metrics` (an enable-list)
+  from `metrics/<id>/output/final/tile_feed_<id>.json` — **LPV included (full symmetry)**, emitted by
+  `metrics/lpv/code/05_tile_feed.py`. The old `config.scorecard_tiles` path list is retired; the
+  placeholder label is now "Coming soon…".
+- **2026-06-03 (v1.1)** — added the optional `provenance` block (§7) + `contract/tile_feed.schema.json`.

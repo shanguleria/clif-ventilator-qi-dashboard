@@ -1,13 +1,17 @@
-# LPV — Lung-Protective Ventilation Adherence Dashboard
+# CLIF ICU Ventilator-QI Bundle Dashboard
 
-A reproducible [CLIF](https://clif-consortium.github.io/website/) pipeline that builds an
-**interactive, self-contained HTML dashboard** characterizing adherence to a lung-protective
-ventilation (LPV) bundle among adult ICU patients receiving invasive mechanical ventilation (IMV).
+A reproducible [CLIF](https://clif-consortium.github.io/website/) **monorepo** that builds a
+glanceable **ICU ventilator / liberation QI bundle scorecard** — one tile per metric — plus a
+detailed drill-down per metric. Each metric is its own self-contained pipeline that emits a small,
+PHI-free **tile feed**; the scorecard is a combiner that collects them.
 
 Any CLIF 2.x site can clone this repo, point it at their own CLIF data, and run one command to
-produce their own dashboard. It is **descriptive epidemiology only** — no outcome modeling.
+produce their own scorecard. It is **descriptive epidemiology only** — no outcome modeling.
 
 ![pipeline](https://img.shields.io/badge/CLIF-2.x-blue) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+
+The metrics shipped today: **LPV** (lung-protective ventilation — the reference implementation),
+**ARDS proning**, and **SAT** (spontaneous awakening trials). SBT and mobilization are placeholders.
 
 ---
 
@@ -16,19 +20,16 @@ produce their own dashboard. It is **descriptive epidemiology only** — no outc
 The build writes a self-contained, shippable bundle to **`output/dashboard/`**:
 
 - **`scorecard.html`** — the glanceable ICU ventilator-QI bundle scorecard (open this).
-- **`lpv_dashboard.html`** — the detailed LPV drill-down (the scorecard's LPV tile links here).
-- plus a copy of any external metric's detail dashboard (e.g. `proning_dashboard.html`).
+- **`lpv_dashboard.html`**, **`proning_dashboard.html`**, **`sat_dashboard.html`** — each metric's
+  detailed drill-down (the scorecard tiles link here).
 
 The whole `output/dashboard/` folder travels together (the HTML files cross-link by relative name).
 
-`lpv_dashboard.html` (~8 MB, Plotly inlined, works offline) has four tabs:
-
-- **Tidal Volume** — adherence to a tunable Vt/kg cutoff, with a slider (4–10 mL/kg) and time trends.
-- **Component breakdown** — the three components reported **separately, each on its own denominator**.
-- **By unit & over time** — adherence by ICU unit and month/day.
-- **Distributions & cohort** — time-weighted ventilator-settings histograms + a cohort Table 1.
-
-Two global controls: a **Vt-cutoff slider** and a **time-period selector** (all-time / year / month).
+`lpv_dashboard.html` (~8 MB, Plotly inlined, works offline) has four tabs: **Tidal Volume** (adherence
+to a tunable Vt/kg cutoff, slider 4–10 mL/kg), **Component breakdown** (the three components reported
+separately, each on its own denominator), **By unit & over time**, and **Distributions & cohort**
+(time-weighted settings histograms + a cohort Table 1). Two global controls: a **Vt-cutoff slider**
+and a **time-period selector**.
 
 ### The LPV bundle
 
@@ -40,17 +41,16 @@ Three components, evaluated on **mode-eligible IMV time**, time-weighted within 
 2. **Plateau pressure** ≤ 30 cm H₂O — fixed
 3. **Driving pressure** (∆P = Plateau − PEEP) ≤ 15 cm H₂O — fixed
 
-Each component is reported on **its own denominator** (the patient-days where that component is
-measurable), plus a strict joint **composite** (all three). This separation matters because the
-components have very different missingness — tidal volume is densely charted, plateau is sparse —
-so a single composite would force the well-measured Vt to share plateau's small denominator.
-PBW uses the Devine/ARDSnet formula from `patient.sex_category` and height (`vitals.height_cm`).
+Each component is reported on **its own denominator** (plus a strict joint composite), because the
+components have very different missingness (Vt densely charted, plateau sparse) — a single composite
+would force well-measured Vt to share plateau's small denominator. PBW uses the Devine/ARDSnet
+formula from `patient.sex_category` and height (`vitals.height_cm`).
 
 ---
 
-## CLIF tables required
+## CLIF tables required (LPV metric)
 
-CLIF 2.x, all as the `filetype` in `config.json` (default `parquet`):
+CLIF 2.x, as the `filetype` in `config.json` (default `parquet`):
 
 | Table | Used for |
 |---|---|
@@ -61,15 +61,15 @@ CLIF 2.x, all as the `filetype` in `config.json` (default `parquet`):
 | `vitals` | `vital_category == 'height_cm'` (PBW); `vital_category == 'spo2'` (severity S/F surrogate) |
 | `labs` | `lab_category == 'po2_arterial'` (severity P/F ratio) |
 
-Standard CLIF mCIDE category values are assumed (e.g. `device_category` `IMV`, the volume/pressure
-modes in `mode_category`, `po2_arterial`, `spo2`). Outlier handling uses clifpy's built-in ranges.
+(The proning and SAT metrics use additional tables — see each metric's `CLAUDE.md`.) Standard CLIF
+mCIDE category values are assumed; outlier handling uses clifpy's built-in ranges.
 
-### Severity stratifier
+### Severity stratifier (LPV)
 
-The dashboard includes a **Severity filter** ("severe respiratory failure" = P/F < 300, or the S/F surrogate
-< 315 at SpO₂ ≤ 97%, **and** PEEP > 5; FiO₂/PEEP paired within a 4-hour lookback; worst oxygenation of the day).
-This is **not** full Berlin ARDS. Thresholds are named constants in `code/02d_severity.py` and need `labs`
-(`po2_arterial`) + `vitals` (`spo2`).
+The LPV dashboard includes a **Severity filter** ("severe respiratory failure" = P/F < 300, or the
+S/F surrogate < 315 at SpO₂ ≤ 97%, **and** PEEP > 5; FiO₂/PEEP paired within a 4-hour lookback;
+worst oxygenation of the day) — **not** full Berlin ARDS. Thresholds are named constants in
+`metrics/lpv/code/02d_severity.py`.
 
 ---
 
@@ -77,21 +77,20 @@ This is **not** full Berlin ARDS. Thresholds are named constants in `code/02d_se
 
 ```bash
 # 1. Clone
-git clone <your-fork-url> lpv && cd lpv
+git clone https://github.com/shanguleria/clif-ventilator-qi-dashboard.git && cd clif-ventilator-qi-dashboard
 
-# 2. Python environment
+# 2. One shared Python environment for the whole bundle
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
 # 3. Configure for your site
-cp config.example.json config.json
-#   then edit config.json (see below)
+cp config.example.json config.json     # then edit (see below)
 
-# 4. Run the whole pipeline
-./run_pipeline.sh
+# 4. Build the bundle (LPV pipeline + scorecard combiner)
+./run_bundle.sh
 
-# 5. Open the scorecard (the LPV tile links to the detailed dashboard)
-open output/dashboard/scorecard.html          # macOS  (Linux: xdg-open)
+# 5. Open the scorecard (tiles link to each metric's drill-down)
+open output/dashboard/scorecard.html   # macOS  (Linux: xdg-open)
 ```
 
 ### `config.json`
@@ -101,76 +100,91 @@ open output/dashboard/scorecard.html          # macOS  (Linux: xdg-open)
 | `clif_data_path` | Absolute path to your CLIF tables directory |
 | `filetype` | `parquet` (default), `csv`, etc. — passed to clifpy |
 | `timezone` | Your site's local tz (e.g. `US/Central`) — used for calendar-day binning |
-| `site` | Your site label — appears in the dashboard title (display only) |
-| `clif_version` | Your CLIF version string (display only) |
-| `output_path` | Where artifacts are written (default `output/`); the shippable bundle lands in `output/dashboard/` |
-| `scorecard_tiles` | Optional list of external `tile_feed_<metric>.json` paths (relative to repo root or absolute) to ingest as extra scorecard tiles, e.g. `["../proning/output/final/tile_feed_proning.json"]`. Empty `[]` = LPV tile only |
+| `site` | Your site label — appears in the dashboard title + each feed's provenance |
+| `clif_version` | Your CLIF version string |
+| `metrics` | Which metric tiles to build, in slot order, e.g. `["lpv", "proning", "sat"]`. A listed metric with no feed yet shows a "Coming soon…" placeholder; omit a metric you don't run |
 
 `config.json` is **gitignored** so your data path stays local; commit only `config.example.json`.
 
 ---
 
-## Pipeline
+## Repository layout
 
-`run_pipeline.sh` runs these steps in order (each is idempotent and reads the previous step's output):
+```
+config.example.json     # copy to config.json and edit
+requirements.txt        # one shared venv for the whole bundle
+run_bundle.sh           # one-command build: LPV pipeline -> scorecard
+refresh_scorecard.sh    # fast scorecard-only rebuild (no CLIF re-read)
+CODEOWNERS              # per-metric ownership (stub; solo for now)
+contract/               # the tile-feed spec + JSON Schema (the only thing the scorecard depends on)
+metrics/                # one folder per QI vertical (see metrics/README.md)
+  lpv/      code/ ...    #   the reference metric: 01_cohort -> 04_dashboard + 05_tile_feed
+  proning/  code/ ...
+  sat/      code/ ...
+scorecard/              # build_scorecard.py — the combiner (collects feeds, renders scorecard.html)
+feeds/                  # collected PHI-free tile feeds (the per-site submission set; build artifact)
+output/dashboard/       # the shippable bundle: scorecard.html + each metric's drill-down (gitignored)
+```
+
+Each metric emits `metrics/<id>/output/final/tile_feed_<id>.json` (+ its `<id>_dashboard.html`). The
+combiner collects every metric in `config.json → metrics`, stages feeds into `feeds/`, ships the
+drill-downs into `output/dashboard/`, and renders the scorecard.
+
+## Pipeline (LPV metric + combiner)
+
+`run_bundle.sh` runs these in order:
 
 | Step | Script | Output |
 |---|---|---|
-| 1 | `code/01_cohort.py` | `01_cohort_patient_days.parquet` — adult IMV-on-ICU patient-day cohort + PBW |
-| 2 | `code/02_features.py` | `02_patient_day_status.parquet`, `02_intervals.parquet` — per-component adherence |
-| 2d | `code/02d_severity.py` | `02d_severity.parquet` — severe-respiratory-failure flag per patient-day |
-| 3 | `code/03_aggregate.py` | `03_*_unit_summary.parquet`, `03_vt_grid_*.parquet` — (time × unit, severity) rollups + Vt grid |
-| 4 | `code/04_dashboard.py` | `dashboard/lpv_dashboard.html` — the detailed LPV drill-down dashboard |
-| 5 | `code/05_scorecard.py` | **`dashboard/scorecard.html`** — the CLIF ICU ventilator-QI scorecard (open this; LPV tile → the drill-down). Also copies each `scorecard_tiles` detail dashboard into `dashboard/` |
+| 1 | `metrics/lpv/code/01_cohort.py` | adult IMV-on-ICU patient-day cohort + PBW |
+| 2 | `metrics/lpv/code/02_features.py` | per-component adherence (`02_patient_day_status`, `02_intervals`) |
+| 2d | `metrics/lpv/code/02d_severity.py` | severe-respiratory-failure flag per patient-day |
+| 3 | `metrics/lpv/code/03_aggregate.py` | (time × unit, severity) rollups + Vt-cutoff grid |
+| 4 | `metrics/lpv/code/04_dashboard.py` | `metrics/lpv/output/final/lpv_dashboard.html` |
+| 5 | `metrics/lpv/code/05_tile_feed.py` | `metrics/lpv/output/final/tile_feed_lpv.json` |
+| → | `scorecard/build_scorecard.py` | **`output/dashboard/scorecard.html`** (collects every enabled metric) |
 
-### Scorecard
+Other metrics (proning, sat) are their own pipelines under `metrics/<id>/`; run those in their own
+dir when their data updates. The combiner just collects whatever feeds exist.
 
-`dashboard/scorecard.html` is a glanceable QI bundle scorecard in the CLIF house style, filterable by **ICU unit**
-and by **month or week** (mutually exclusive). The **LPV tile** (real) shows tidal-volume adherence at
-≤ `SCORECARD_VT_CUTOFF` mL/kg (default 8) with a goal bar and a 3-segment mini-indicator (Plateau ≤30 · ∆P ≤15 ·
-Vt in *severe* patients), and links to the detailed dashboard. Headline metric, goal, and cutoff are named
-constants in `code/05_scorecard.py`.
+### The scorecard is a combiner, not a place to add metric logic
 
-The scorecard is **registry-driven**: it is a *combiner*, not a place to add metric logic. Each metric is its own
-pipeline (often its own repo) that emits a small, PHI-free **`tile_feed_<metric>.json`** (schema in
-`plans/02_scorecard_tile_contract.md`). The LPV tile is built in-memory here; every other tile is read from the
-paths listed in `config.json` → `scorecard_tiles`. For each external feed the build validates it, renders it through
-the **same tile component** (donut + up to 3 segments + optional goal bar + sparkline), and **copies its detail
-dashboard into `output/dashboard/`** so the tile's "View details →" link resolves. A coarse feed (e.g. proning is
-site-wide / all-time only) automatically shows a **`· site-wide` / `· all-time` badge** when the global Unit/Week
-filters are finer than the feed provides, so a number is never silently mislabeled. A slot with no feed renders a
-styled **"Not yet computed"** placeholder, so the scorecard always builds.
+It is **registry-driven**: each metric is its own vertical that emits a PHI-free
+`tile_feed_<metric>.json` (spec: [`contract/tile_feed_contract.md`](contract/tile_feed_contract.md),
+schema: `contract/tile_feed.schema.json`). The combiner renders each through the **same tile
+component** (donut + up to 3 segments + optional goal bar + sparkline) and copies its detail dashboard
+into `output/dashboard/`. A coarse feed (e.g. proning is site-wide / all-time only) shows a
+**`· site-wide` / `· all-time` badge** when the global Unit/Week filters are finer than it provides,
+so a number is never silently mislabeled. A slot with no feed shows a **"Coming soon…"** placeholder.
 
-So adding a metric (SAT, SBT, mobilization, …) is: *build the vertical → emit a tile feed → add one path to
-`scorecard_tiles`* — no scorecard code change. Ship the whole `output/dashboard/` folder together (the HTML files
-cross-link by relative name).
+So adding a metric is: *build the vertical → emit a tile feed → add its id to `config.json → metrics`*
+— no scorecard code change. See [`metrics/README.md`](metrics/README.md).
 
-Tile artwork is read from `references/images/<LPV|SAT|SBT|Proning|Mobilization>.png` (downscaled + embedded at build
-time); that folder is gitignored, and the scorecard **falls back to inline SVG icons** when the images are absent —
-so a fresh clone still builds.
+Tile artwork is read from `assets/<LPV|SAT|SBT|Proning|Mobilization>.png` (downscaled + embedded at
+build time); that folder is gitignored, and the scorecard **falls back to inline SVG icons** when the
+images are absent — so a fresh clone still builds.
 
 ### Recommended first: check your data
 
-Before trusting the dashboard, run the **data-quality probes** to confirm your site's coverage
-(these print aggregated summaries only — no patient rows):
+Before trusting the dashboard, run the **data-quality probes** (aggregated summaries only — no
+patient rows):
 
 ```bash
-.venv/bin/python code/00_probe_missingness.py        # variable completeness for the IMV cohort
-.venv/bin/python code/01b_cohort_assessment.py        # cohort sanity checks (after step 1)
-.venv/bin/python code/02c_component_probe.py          # per-component assessability (after step 2)
-.venv/bin/python code/02b_vt_sensitivity.py           # adherence vs Vt cutoff (after step 2)
+.venv/bin/python metrics/lpv/code/00_probe_missingness.py     # variable completeness for the IMV cohort
+.venv/bin/python metrics/lpv/code/01b_cohort_assessment.py    # cohort sanity checks (after step 1)
+.venv/bin/python metrics/lpv/code/02c_component_probe.py      # per-component assessability (after step 2)
+.venv/bin/python metrics/lpv/code/02b_vt_sensitivity.py       # adherence vs Vt cutoff (after step 2)
 ```
 
-Pay attention to **plateau-pressure completeness** and **height availability** — these drive how
-much of the cohort is assessable at your site. See `output/00_probe_summary.md` and
-`output/01b_cohort_assessment.md`.
+Pay attention to **plateau-pressure completeness** and **height availability** — these drive how much
+of the cohort is assessable at your site.
 
 ---
 
-## Customizing the analytic choices
+## Customizing the LPV analytic choices
 
-The locked design is documented in [`plans/01_design.md`](plans/01_design.md). The key parameters
-are named constants near the top of `code/02_features.py` (and mirrored in `03`/`04`):
+The key parameters are named constants near the top of `metrics/lpv/code/02_features.py` (mirrored in
+`03`/`04`):
 
 | Parameter | Default | Where |
 |---|---|---|
@@ -179,37 +193,23 @@ are named constants near the top of `code/02_features.py` (and mirrored in `03`/
 | Adherence fraction / assessable floor | 80% / 60 min | `ADHERENCE_FRACTION`, `MIN_ASSESSABLE_MIN` |
 | Carry-forward windows | Vt/PEEP 2 h, plateau/mode 6 h | `CF_FAST`, `CF_SLOW` |
 | Eligible ventilator modes | AC-VC, PRVC, SIMV, PC | `ELIGIBLE_MODES` |
-| Vt-cutoff grid (dashboard slider) | 4.0–10.0 by 0.5 | `VT_GRID` (in `03`/`04`) |
+| Scorecard headline Vt cutoff / goal | 8 mL/kg / 90% | `SCORECARD_VT_CUTOFF`, `LPV_GOAL` (in `05_tile_feed.py`) |
 
-The **6-hour plateau carry-forward** reflects a Q4-shift plateau-charting cadence; if your site
-charts plateau less often, widen it. Re-run `run_pipeline.sh` after any change.
+The **6-hour plateau carry-forward** reflects a Q4-shift plateau-charting cadence; widen it if your
+site charts plateau less often. Re-run `run_bundle.sh` after any change.
 
 ---
 
 ## Data safety
 
-- The pipeline reads CLIF tables but **embeds only aggregated values** (rates, counts, binned
-  histograms, and per-period aggregated Table 1s) into the dashboard — **no patient-level rows**.
-- `output/` is gitignored; the dashboard HTML is not committed. Treat generated outputs per your
-  site's data-governance rules before sharing.
-- The dashboard uses real ICU **unit** labels (within-site unit types). If you intend to share it
-  outside your institution, review your consortium's anonymization expectations first.
-
----
-
-## Repository layout
-
-```
-config.example.json   # copy to config.json and edit
-requirements.txt
-run_pipeline.sh        # one-command build (01 -> 05)
-code/                  # pipeline + data-quality probes
-plans/01_design.md     # authoritative methodology / locked analytic choices
-output/                # generated artifacts (gitignored)
-output/dashboard/      #   └─ the shippable bundle: scorecard.html + the per-metric drill-downs
-```
+- The pipelines read CLIF tables but **embed only aggregated values** (rates, counts, binned
+  histograms, per-period aggregated Table 1s) — **no patient-level rows**. Tile feeds carry only
+  `num`/`den` counts and are PHI-checked at build time.
+- `output/`, `feeds/*.json`, and `assets/` are gitignored; nothing patient-adjacent is committed.
+- Dashboards use real ICU **unit** labels (within-site). For audience-facing / consortium use, review
+  your consortium's anonymization expectations (per-site displays should use anonymized "Site N").
 
 ## Acknowledgements
 
-Built on the [Common Longitudinal ICU Format (CLIF)](https://clif-consortium.github.io/website/)
-and the [`clifpy`](https://pypi.org/project/clifpy/) library. Licensed under MIT (see `LICENSE`).
+Built on the [Common Longitudinal ICU Format (CLIF)](https://clif-consortium.github.io/website/) and
+the [`clifpy`](https://pypi.org/project/clifpy/) library. Licensed under MIT (see `LICENSE`).
