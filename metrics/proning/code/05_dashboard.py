@@ -429,15 +429,19 @@ FILTER_JS = r"""
     const host = $("trend");
     if (!keys.length){ host.innerHTML = '<div class="muted">No periods in this slice.</div>'; return; }
     const slot = keys.length > 40 ? 15 : (keys.length > 15 ? 34 : 56);
-    const pad = {l:36, r:12, t:14, b:48}, ih = 150;
+    const pad = {l:40, r:12, t:14, b:56}, ih = 150;
     const W = pad.l + pad.r + keys.length*slot, H = pad.t + ih + pad.b;
     let maxr = 0.05; for (const k of keys){ const d = series[k]; if (d.den) maxr = Math.max(maxr, d.proned/d.den); }
     const top = Math.max(0.1, Math.ceil(maxr*100/10)*10/100);
     const lblStep = Math.ceil(keys.length/24);
-    let svg = '<line x1="'+pad.l+'" y1="'+pad.t+'" x2="'+pad.l+'" y2="'+(pad.t+ih)+'" stroke="#ece1d9"/>' +
-              '<line x1="'+pad.l+'" y1="'+(pad.t+ih)+'" x2="'+(W-pad.r)+'" y2="'+(pad.t+ih)+'" stroke="#ece1d9"/>' +
-              '<text x="'+(pad.l-6)+'" y="'+(pad.t+4)+'" font-size="9" text-anchor="end" fill="#9a8c86">'+(100*top).toFixed(0)+'%</text>' +
-              '<text x="'+(pad.l-6)+'" y="'+(pad.t+ih)+'" font-size="9" text-anchor="end" fill="#9a8c86">0</text>';
+    // y grid (0 / mid / top): faint dashed lines behind the bars + % labels at left
+    let svg = '';
+    [0, 0.5, 1].forEach(f => {
+      const gy = pad.t + ih*(1 - f);
+      svg += '<line x1="'+pad.l+'" y1="'+gy+'" x2="'+(W-pad.r)+'" y2="'+gy+'" stroke="'+(f===0?"#d8c7bf":"#ece1d9")+'"'+(f===0?"":' stroke-dasharray="2 3"')+'/>';
+      svg += '<text x="'+(pad.l-7)+'" y="'+(gy+3.5)+'" font-size="10" text-anchor="end" fill="#7a6c66">'+(100*top*f).toFixed(0)+'%</text>';
+    });
+    svg += '<line x1="'+pad.l+'" y1="'+pad.t+'" x2="'+pad.l+'" y2="'+(pad.t+ih)+'" stroke="#d8c7bf"/>';
     keys.forEach((k, i) => {
       const d = series[k], r = d.den ? d.proned/d.den : 0, ar = d.den ? d.adherent/d.den : 0;
       const x = pad.l + i*slot + slot*0.16, w = slot*0.68;
@@ -451,8 +455,9 @@ FILTER_JS = r"""
       svg += '<rect x="'+x+'" y="'+yA+'" width="'+w+'" height="'+hA+'" fill="'+cD+'"/></g>';
       if (i % lblStep === 0){
         const lab = tg === "month" ? k.slice(2) : (tg === "week" ? k.replace(/^\d{4}-/, "") : k);
-        const cx = x + w/2;
-        svg += '<text x="'+cx+'" y="'+(H-pad.b+12)+'" font-size="8.5" text-anchor="end" fill="#9a8c86" transform="rotate(35 '+cx+' '+(H-pad.b+12)+')">'+lab+'</text>';
+        const cx = x + w/2, axisY = pad.t + ih, ly = axisY + 11;
+        svg += '<line x1="'+cx+'" y1="'+axisY+'" x2="'+cx+'" y2="'+(axisY+4)+'" stroke="#cbb8b0"/>';
+        svg += '<text x="'+cx+'" y="'+ly+'" font-size="10" text-anchor="end" fill="#6b5d57" transform="rotate(-35 '+cx+' '+ly+')">'+lab+'</text>';
       }
     });
     host.innerHTML = '<svg viewBox="0 0 '+W+' '+H+'" height="'+H+'" width="'+W+'" style="max-width:none">'+svg+'</svg>';
