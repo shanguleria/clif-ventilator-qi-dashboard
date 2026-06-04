@@ -1,11 +1,16 @@
-"""Stage 03 — SBT delivery detection (the numerator), transition-only per Jain et al.
+"""Stage 03 — SBT delivery detection (the numerators) per Jain et al. + liberal views.
 
 For each ventilated-ICU day we look on the NATIVE-resolution waterfall rows for a
-CONTROLLED -> SUPPORT mode transition sustained >= support_min_minutes, where the
-support episode is `pressure support/cpap` with PEEP <= ps_peep_max (pressure-support
-arm) or PEEP <= cpap_peep_max (CPAP arm). A transition whose start falls inside the
-day's ventilated-ICU window marks that day as "SBT delivered". Transition-only: a
-patient parked on support all day with no controlled->support edge does NOT count.
+CONTROLLED -> SUPPORT mode transition, where the support episode is `pressure
+support/cpap` with PEEP <= ps_peep_max (pressure-support arm) or PEEP <= cpap_peep_max
+(CPAP arm). A transition whose start falls inside the day's ventilated-ICU window marks
+the day. Three nested numerators are emitted (strict ⊆ any-duration ⊆ on-spontaneous):
+  sbt_delivered      — strict (Jain headline): transition sustained >= support_min_minutes
+  sbt_delivered_any  — liberal: a controlled->support transition of ANY duration
+  on_spontaneous     — liberal: on ANY support mode at all that day (no transition, no
+                       PEEP gate) — a patient parked on support all day counts here only.
+Leadership asked for the more liberal views to see "what is actually happening"; the
+strict transition-only numerator remains the by-the-book reference.
 
 Each transition episode is attributed to its US/Central calendar day and LEFT-joined
 onto the cohort/eligibility skeleton (cohort-restriction discipline — never group raw
@@ -49,16 +54,23 @@ def _load_cohort_module():
     return mod
 
 
-def attribute_transitions(days: pd.DataFrame, trans: pd.DataFrame) -> pd.DataFrame:
+def attribute_transitions(days: pd.DataFrame, trans: pd.DataFrame, min_min: float) -> pd.DataFrame:
     """Per (encounter_block, icu_day): SBT-delivery flags from transition episodes
-    whose ep_start falls inside the day window."""
+    whose ep_start falls inside the day window.
+
+    From the one (arm-qualified, all-duration) transition set we derive BOTH numerators:
+      sbt_delivered      — strict: >=1 transition sustained >= min_min  (Jain headline)
+      sbt_delivered_any  — liberal: >=1 transition of ANY duration
+    """
     base = days[["encounter_block", "icu_day", "day_in", "day_out"]].copy()
     base["encounter_block"] = base["encounter_block"].astype(str)
-    cols = ["encounter_block", "icu_day", "sbt_delivered", "n_transitions",
-            "longest_support_min", "sbt_arm"]
+    cols = ["encounter_block", "icu_day", "sbt_delivered", "sbt_delivered_any",
+            "n_transitions", "n_transitions_strict", "longest_support_min", "sbt_arm"]
     if trans is None or trans.empty:
         base["sbt_delivered"] = False
+        base["sbt_delivered_any"] = False
         base["n_transitions"] = 0
+        base["n_transitions_strict"] = 0
         base["longest_support_min"] = 0.0
         base["sbt_arm"] = ""
         return base[cols]
@@ -68,10 +80,12 @@ def attribute_transitions(days: pd.DataFrame, trans: pd.DataFrame) -> pd.DataFra
     con.register("d", base)
     con.register("t", t)
     out = con.execute(
-        """
+        f"""
         SELECT d.encounter_block AS encounter_block, d.icu_day AS icu_day,
-               COUNT(t.ep_start) > 0           AS sbt_delivered,
+               SUM(CASE WHEN t.dur_min >= {float(min_min)} THEN 1 ELSE 0 END) > 0 AS sbt_delivered,
+               COUNT(t.ep_start) > 0           AS sbt_delivered_any,
                COUNT(t.ep_start)               AS n_transitions,
+               SUM(CASE WHEN t.dur_min >= {float(min_min)} THEN 1 ELSE 0 END) AS n_transitions_strict,
                COALESCE(MAX(t.dur_min), 0.0)   AS longest_support_min,
                COALESCE(string_agg(DISTINCT t.arm, ','), '') AS sbt_arm
         FROM d LEFT JOIN t
@@ -82,7 +96,9 @@ def attribute_transitions(days: pd.DataFrame, trans: pd.DataFrame) -> pd.DataFra
     ).fetchdf()
     con.close()
     out["sbt_delivered"] = out["sbt_delivered"].fillna(False).astype(bool)
+    out["sbt_delivered_any"] = out["sbt_delivered_any"].fillna(False).astype(bool)
     out["n_transitions"] = out["n_transitions"].fillna(0).astype(int)
+    out["n_transitions_strict"] = out["n_transitions_strict"].fillna(0).astype(int)
     out["longest_support_min"] = out["longest_support_min"].fillna(0.0)
     # normalize arm label: ps / cpap / both
     out["sbt_arm"] = out["sbt_arm"].fillna("").apply(
@@ -118,15 +134,33 @@ def main() -> None:
     wf["encounter_block"] = wf["encounter_block"].astype(str)
     wf = wf[wf["encounter_block"].isin(cohort_blocks)]
 
+    min_min = float(obs_cfg.get("support_min_minutes", 2))
     trans = sd.support_transitions(wf, cfg)
-    log.info("controlled->support transition episodes (>=min, arm-qualified): %d", len(trans))
+    n_trans_strict = int((trans["dur_min"] >= min_min).sum()) if not trans.empty else 0
+    log.info("controlled->support transition episodes (arm-qualified): %d  (>=%.0f min: %d)",
+             len(trans), min_min, n_trans_strict)
 
-    obs_flags = attribute_transitions(elig, trans)
-    out = elig.merge(obs_flags, on=["encounter_block", "icu_day"], how="left")
+    obs_flags = attribute_transitions(elig, trans, min_min)
+    # liberal "on a spontaneous mode at all" flag (no transition, no PEEP gate)
+    spont = sd.support_presence_days(wf, elig, cfg)
+
+    out = (elig
+           .merge(obs_flags, on=["encounter_block", "icu_day"], how="left")
+           .merge(spont, on=["encounter_block", "icu_day"], how="left"))
     out["sbt_delivered"] = out["sbt_delivered"].fillna(False).astype(bool)
+    out["sbt_delivered_any"] = out["sbt_delivered_any"].fillna(False).astype(bool)
+    out["on_spontaneous"] = out["on_spontaneous"].fillna(False).astype(bool)
     out["n_transitions"] = out["n_transitions"].fillna(0).astype(int)
+    out["n_transitions_strict"] = out["n_transitions_strict"].fillna(0).astype(int)
     out["longest_support_min"] = out["longest_support_min"].fillna(0.0)
     out["sbt_arm"] = out["sbt_arm"].fillna("")
+
+    # Numerator nesting invariant: strict transition => any-duration transition => on support.
+    bad_nest = (out["sbt_delivered"] & ~out["sbt_delivered_any"]).sum() + \
+               (out["sbt_delivered_any"] & ~out["on_spontaneous"]).sum()
+    if bad_nest:
+        raise RuntimeError(f"numerator nesting violated on {int(bad_nest)} days "
+                           "(strict ⊆ any-duration ⊆ on-spontaneous)")
     out.to_parquet(inter / "sbt_observation.parquet", index=False)
 
     # ---- coverage diagnostic: native vs scaffold share of support-mode readings ----
@@ -143,13 +177,21 @@ def main() -> None:
     (inter / "sbt_diag.json").write_text(json.dumps(diag, indent=2))
 
     # ---- log ----
+    n_days = int(len(out))
     n_elig = int(out["eligible"].sum())
     n_sbt = int((out["eligible"] & out["sbt_delivered"]).sum())
     n_sbt_anyday = int(out["sbt_delivered"].sum())
     log.info("eligible SBT-opportunity days: %6d", n_elig)
     log.info("  SBT delivered / eligible:    %6d (%.1f%%)  [headline numerator]",
              n_sbt, 100 * n_sbt / max(n_elig, 1))
-    log.info("  (transitions on any day:     %6d)", n_sbt_anyday)
+    log.info("  (strict transitions any day: %6d)", n_sbt_anyday)
+    log.info("liberal numerators (any vent-ICU day, n=%d):", n_days)
+    log.info("  strict SBT (>=%.0f min):       %6d (%.1f%%)", min_min,
+             n_sbt_anyday, 100 * n_sbt_anyday / max(n_days, 1))
+    log.info("  SBT any duration:            %6d (%.1f%%)",
+             int(out["sbt_delivered_any"].sum()), 100 * int(out["sbt_delivered_any"].sum()) / max(n_days, 1))
+    log.info("  on a spontaneous mode:       %6d (%.1f%%)",
+             int(out["on_spontaneous"].sum()), 100 * int(out["on_spontaneous"].sum()) / max(n_days, 1))
     if pct_native is not None:
         log.info("coverage: %.1f%% of support-mode readings are native-resolution (%d/%d)",
                  pct_native, n_supp_native, n_supp)

@@ -49,7 +49,13 @@
     "peep_max": 8,
     "spo2_min": 88,
     "ne_equiv_max_mcg_kg_min": 0.2,
-    "exclude_trach_days": true
+    "exclude_trach_days": true,
+    "exclude_paralytic_days": true
+  },
+
+  "_comment_sbt_paralytics": "Continuous neuromuscular blockade precludes spontaneous breathing -> a vent-ICU day overlapping a continuous-paralytic infusion is excluded from the eligible denominator (status 'excluded_paralytic'; shown as a justified exclusion). paralytic_categories are CLIF medication_admin_continuous med_category strings (lowercased match). Set exclude_paralytic_days=false to disable.",
+  "sbt_paralytics": {
+    "paralytic_categories": ["cisatracurium", "rocuronium", "vecuronium", "atracurium", "pancuronium"]
   },
 
   "_comment_sbt_vasopressors": "Standard published norepinephrine-equivalent factors (mcg/kg/min unless noted). Swap to your reference standard or Jain's exact table. Vasopressin factor applies to u/min directly (not weight-normalized). Inotropes default to 0.",

@@ -10,12 +10,15 @@ ELIGIBLE SBT opportunity iff:
   - the patient is NOT tracheostomized that day (excluded from numerator AND
     denominator).
 
-Eligibility status per non-trach day:
-  eligible        — accrued 12h controlled AND a >=2h stable window
-  not_assessable  — accrued 12h but stability un-assessable (no scaffold hour with
-                    all four signals) -> reported as a bound, excluded from the rate
-  not_eligible    — accrued 12h but assessed not-stable, OR < 12h controlled
-  excluded_trach  — tracheostomized that day (dropped from num & den)
+Eligibility status per day (priority: trach > paralytic > stability/accrual):
+  excluded_trach     — tracheostomized that day (dropped from num & den)
+  excluded_paralytic — a continuous paralytic (NMBA) infusion in effect that day; no
+                       respiratory drive, so not an SBT candidate -> dropped from the
+                       eligible denominator, shown as a justified exclusion
+  eligible           — accrued 12h controlled AND a >=2h stable window
+  not_assessable     — accrued 12h but stability un-assessable (no scaffold hour with
+                       all four signals) -> reported as a bound, excluded from the rate
+  not_eligible       — accrued 12h but assessed not-stable, OR < 12h controlled
 
 Inputs: cohort.parquet, the warm resp_waterfall cache, vitals (spo2 + weight_kg),
 medication_admin_continuous (vasopressors). Aggregates only to stdout.
@@ -66,6 +69,7 @@ def main() -> None:
     elig_cfg = cfg["sbt_eligibility"]
     ctrl_min_h = int(elig_cfg.get("controlled_min_hours", 12))
     exclude_trach = bool(elig_cfg.get("exclude_trach_days", True))
+    exclude_paralytic = bool(elig_cfg.get("exclude_paralytic_days", True))
 
     inter = cohort_mod.INTERMEDIATE_DIR
 
@@ -112,19 +116,22 @@ def main() -> None:
         ["hospitalization_id", "recorded_dttm", "vital_category", "vital_value"]].copy()
     log.info("vitals: spo2=%d obs, weight_kg=%d obs", len(spo2), len(weight_vitals))
 
-    # ---- vasopressors -> norepinephrine-equivalent timeline ----
+    # ---- continuous meds: vasopressors (NEE) + paralytics (exclusion) in one load ----
     vaso_cats = sorted(sv.vasopressor_categories(cfg))
+    paralytic_cats = sorted(sd.paralytic_categories(cfg)) if exclude_paralytic else []
+    med_cats = sorted(set(vaso_cats) | set(paralytic_cats))
     mac = MedicationAdminContinuous.from_file(
         ds["data_path"], filetype=ds["file_format"], timezone=tz,
-        filters={"hospitalization_id": hosp_ids, "med_category": vaso_cats},
+        filters={"hospitalization_id": hosp_ids, "med_category": med_cats},
         columns=["hospitalization_id", "admin_dttm", "med_category", "med_dose",
                  "med_dose_unit", "mar_action_category"],
     ).df
     mac["hospitalization_id"] = mac["hospitalization_id"].astype(str)
     mac["encounter_block"] = mac["hospitalization_id"].map(h2b).astype("string")
     mac = mac.dropna(subset=["encounter_block"])
-    log.info("vasopressor rows: %d (med_categories present: %s)",
+    log.info("continuous-med rows: %d (med_categories present: %s)",
              len(mac), sorted(mac["med_category"].astype("string").str.lower().dropna().unique().tolist()))
+    # NEE timeline (ne_equiv_timeline filters to vasopressor categories internally)
     ne_tl = sv.ne_equiv_timeline(mac, weight_vitals, cfg, tz)
     log.info("NE-equiv timeline change-points: %d (blocks=%d)",
              len(ne_tl), ne_tl["encounter_block"].nunique() if not ne_tl.empty else 0)
@@ -133,27 +140,34 @@ def main() -> None:
     ctrl = sd.controlled_hours_before(wf, cohort, cfg)
     trach = sd.trach_day_flag(wf, cohort)
     stab = sd.hourly_stability_window(wf, cohort, spo2, ne_tl, cfg)
+    paral = sd.paralytic_day_flag(mac, cohort, cfg, tz)
 
     out = (cohort
            .merge(ctrl, on=["encounter_block", "icu_day"], how="left")
            .merge(trach, on=["encounter_block", "icu_day"], how="left")
-           .merge(stab, on=["encounter_block", "icu_day"], how="left"))
+           .merge(stab, on=["encounter_block", "icu_day"], how="left")
+           .merge(paral, on=["encounter_block", "icu_day"], how="left"))
     out["prior_controlled_h"] = out["prior_controlled_h"].fillna(0).astype(int)
     out["trach_day"] = out["trach_day"].fillna(False).astype(bool)
+    out["on_paralytic"] = out["on_paralytic"].fillna(False).astype(bool)
     out["stable_window"] = out["stable_window"].fillna(False).astype(bool)
     for c in ("n_stable_hours", "n_scaffold_hours", "n_assessable_hours"):
         out[c] = out[c].fillna(0).astype(int)
 
     out["accrued_12h"] = out["prior_controlled_h"] >= ctrl_min_h
     trach_flag = out["trach_day"] & exclude_trach
+    paral_flag = out["on_paralytic"] & exclude_paralytic
 
-    # Status (per the docstring).
+    # Status (per the docstring). A continuous paralytic precludes spontaneous breathing,
+    # so a paralyzed (non-trach) day is excluded from the eligible denominator (justified).
     cond_trach = trach_flag
-    cond_elig = (~trach_flag) & out["accrued_12h"] & out["stable_window"]
-    cond_notassess = (~trach_flag) & out["accrued_12h"] & (~out["stable_window"]) & (out["n_assessable_hours"] == 0)
+    cond_paral = (~trach_flag) & paral_flag
+    free = (~trach_flag) & (~paral_flag)
+    cond_elig = free & out["accrued_12h"] & out["stable_window"]
+    cond_notassess = free & out["accrued_12h"] & (~out["stable_window"]) & (out["n_assessable_hours"] == 0)
     out["eligibility_status"] = np.select(
-        [cond_trach, cond_elig, cond_notassess],
-        ["excluded_trach", "eligible", "not_assessable"],
+        [cond_trach, cond_paral, cond_elig, cond_notassess],
+        ["excluded_trach", "excluded_paralytic", "eligible", "not_assessable"],
         default="not_eligible",
     )
     out["eligible"] = out["eligibility_status"] == "eligible"
@@ -163,15 +177,17 @@ def main() -> None:
     # ---- log ----
     n = len(out)
     n_trach = int(cond_trach.sum())
+    n_paral = int(cond_paral.sum())
     n_nontrach = n - n_trach
-    n_accrued = int(((~trach_flag) & out["accrued_12h"]).sum())
+    n_accrued = int((free & out["accrued_12h"]).sum())
     vc = out["eligibility_status"].value_counts()
     n_elig = int(vc.get("eligible", 0))
     n_notassess = int(vc.get("not_assessable", 0))
     log.info("vent-ICU days:                 %6d", n)
     log.info("  tracheostomized (excluded):  %6d", n_trach)
+    log.info("  continuous paralytic (excl): %6d", n_paral)
     log.info("  non-trach vent-ICU days:     %6d", n_nontrach)
-    log.info("  >=%dh controlled accrued:     %6d (%.1f%% of non-trach)",
+    log.info("  >=%dh controlled accrued (non-trach, non-paralytic): %6d (%.1f%% of non-trach)",
              ctrl_min_h, n_accrued, 100 * n_accrued / max(n_nontrach, 1))
     log.info("  not_assessable stability:    %6d", n_notassess)
     log.info("ELIGIBLE SBT-opportunity days: %6d (%.1f%% of non-trach vent-ICU days)",

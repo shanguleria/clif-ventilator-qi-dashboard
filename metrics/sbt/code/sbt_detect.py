@@ -12,7 +12,13 @@ Four pieces:
   C. hourly_stability_window  — a >=2h contiguous window of FiO2<=0.50, PEEP<=8,
                                 SpO2>=88, NE-equiv<=0.2 (resampled onto scaffold hrs).
   D. support_transitions      — controlled->support mode-change episodes (the SBT,
-                                transition-only) sustained >=2 min, on native rows.
+                                transition-only), arm-qualified, on native rows. Returns
+                                ALL durations with dur_min; the >=2-min "strict" floor
+                                is applied downstream (stage 03) so the same episode set
+                                feeds both the strict and the any-duration numerators.
+  E. support_presence_days    — per patient-day flag: was the patient on ANY support
+                                mode at all that day (no transition required, no PEEP
+                                gate) -> the liberal "on a spontaneous mode" numerator.
 
 Mode vocabulary (lowercased by the waterfall) is config-driven (`sbt_modes`).
 CONTROLLED gates the 12h clock; SUPPORT (pressure support/cpap) is the SBT target.
@@ -275,15 +281,16 @@ def _row_mode_class(wf: pd.DataFrame, cfg: dict, imv_category: str = "imv") -> p
 def support_transitions(wf: pd.DataFrame, cfg: dict, imv_category: str = "imv") -> pd.DataFrame:
     """Controlled->qualifying-support transition episodes on NATIVE rows.
 
-    Returns one row per transition episode:
+    Returns one row per transition episode (ALL durations):
       [encounter_block, ep_start, ep_end, dur_min, arm]
     An episode is a maximal run of consecutive native rows of the SAME mode class;
     a transition is a qualifying-support episode ('sbt_ps'/'sbt_cpap') whose
-    immediately preceding episode in the block is 'controlled', sustained
-    >= support_min_minutes.
+    immediately preceding episode in the block is 'controlled'. The >= support_min_minutes
+    "strict SBT" floor is NOT applied here — stage 03 derives both the strict numerator
+    (dur_min >= floor) and the any-duration numerator (dur_min > 0) from this one set, so
+    the arm qualification (PEEP<=ps_peep_max / CPAP<=cpap_peep_max) is the only gate kept.
     """
     cols = ["encounter_block", "ep_start", "ep_end", "dur_min", "arm"]
-    min_min = float(cfg["sbt_observation"].get("support_min_minutes", 2))
 
     nat = wf[~wf["is_scaffold"].fillna(False)].copy()
     nat["encounter_block"] = nat["encounter_block"].astype(str)
@@ -317,6 +324,124 @@ def support_transitions(wf: pd.DataFrame, cfg: dict, imv_category: str = "imv") 
     if trans.empty:
         return pd.DataFrame(columns=cols)
     trans["dur_min"] = (trans["ep_end"] - trans["ep_start"]).dt.total_seconds() / 60.0
-    trans = trans[trans["dur_min"] >= min_min]
     trans["arm"] = trans["cls"].str.replace("sbt_", "", regex=False)
     return trans[cols].reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# E. On ANY support mode that day (the liberal "on a spontaneous mode" numerator)
+# ---------------------------------------------------------------------------
+def support_presence_days(wf: pd.DataFrame, days: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    """Per (encounter_block, icu_day): True if ANY waterfall row (native OR scaffold)
+    whose recorded_dttm falls in the day window is on a support mode.
+
+    No transition required and NO PEEP/arm gate — this is the broadest "what is actually
+    happening" view (a patient parked on pressure-support/CPAP all day counts, unlike the
+    transition-only SBT numerator). Mode membership is `sbt_modes.support_modes`.
+    Returns [encounter_block, icu_day, on_spontaneous]."""
+    base = days[["encounter_block", "icu_day", "day_in", "day_out"]].copy()
+    base["encounter_block"] = base["encounter_block"].astype(str)
+
+    supp = wf[wf["mode_category"].astype("string").str.lower().isin(support_modes(cfg))][
+        ["encounter_block", "recorded_dttm"]].copy()
+    supp["encounter_block"] = supp["encounter_block"].astype(str)
+    supp = supp.dropna(subset=["recorded_dttm"])
+    if supp.empty:
+        base["on_spontaneous"] = False
+        return base[["encounter_block", "icu_day", "on_spontaneous"]]
+
+    con = duckdb.connect()
+    con.register("d", base)
+    con.register("s", supp)
+    out = con.execute(
+        """
+        SELECT d.encounter_block AS encounter_block, d.icu_day AS icu_day,
+               COUNT(s.recorded_dttm) > 0 AS on_spontaneous
+        FROM d LEFT JOIN s
+          ON d.encounter_block = s.encounter_block
+         AND s.recorded_dttm >= d.day_in AND s.recorded_dttm < d.day_out
+        GROUP BY d.encounter_block, d.icu_day
+        """
+    ).fetchdf()
+    con.close()
+    out["on_spontaneous"] = out["on_spontaneous"].fillna(False).astype(bool)
+    return out[["encounter_block", "icu_day", "on_spontaneous"]]
+
+
+# ---------------------------------------------------------------------------
+# F. Continuous paralytic (NMBA) in effect on a patient-day (eligibility exclusion)
+# ---------------------------------------------------------------------------
+PARALYTIC_TRAILING_CAP = timedelta(hours=24)   # cap an open-ended final paralytic record
+PARALYTIC_STOP_ACTION = "stop"                 # mar_action_category that ends an infusion
+
+
+def _coerce_dttm(series: pd.Series, tz: str) -> pd.Series:
+    s = pd.to_datetime(series, errors="coerce")
+    if getattr(s.dt, "tz", None) is None:
+        return s.dt.tz_localize(tz, ambiguous="NaT", nonexistent="shift_forward")
+    return s.dt.tz_convert(tz)
+
+
+def paralytic_categories(cfg: dict) -> set[str]:
+    return {c.lower() for c in cfg.get("sbt_paralytics", {}).get("paralytic_categories", [])}
+
+
+def paralytic_day_flag(mac: pd.DataFrame, days: pd.DataFrame, cfg: dict, tz: str) -> pd.DataFrame:
+    """Per (encounter_block, icu_day): True if a CONTINUOUS paralytic infusion is in
+    effect at any time in the day window.
+
+    Each charted paralytic record with med_dose>0 (and not a 'stop' mar_action) is "on"
+    from its admin_dttm until the same block's next paralytic record (trailing capped at
+    24h, like the NEE engine). A day overlapping any on-interval is flagged. A paralyzed
+    patient has no respiratory drive, so the day is not an SBT candidate -> excluded from
+    the eligible denominator (status 'excluded_paralytic'). Bolus paralytics live in
+    medication_admin_intermittent and are not captured here.
+    Returns [encounter_block, icu_day, on_paralytic]."""
+    base = days[["encounter_block", "icu_day", "day_in", "day_out"]].copy()
+    base["encounter_block"] = base["encounter_block"].astype(str)
+    cols = ["encounter_block", "icu_day", "on_paralytic"]
+    cats = paralytic_categories(cfg)
+    if mac is None or mac.empty or not cats:
+        base["on_paralytic"] = False
+        return base[cols]
+
+    df = mac[mac["med_category"].astype("string").str.lower().isin(cats)].copy()
+    if df.empty:
+        base["on_paralytic"] = False
+        return base[cols]
+    df["encounter_block"] = df["encounter_block"].astype(str)
+    df["admin_dttm"] = _coerce_dttm(df["admin_dttm"], tz)
+    df = df.dropna(subset=["encounter_block", "admin_dttm"])
+    df["med_dose"] = pd.to_numeric(df.get("med_dose"), errors="coerce")
+    if "mar_action_category" in df.columns:
+        df["__stop"] = df["mar_action_category"].astype("string").str.strip().str.lower().eq(
+            PARALYTIC_STOP_ACTION)
+    else:
+        df["__stop"] = False
+
+    df = df.sort_values(["encounter_block", "admin_dttm"])
+    df["seg_end"] = df.groupby("encounter_block")["admin_dttm"].shift(-1)
+    df["seg_end"] = df["seg_end"].fillna(df["admin_dttm"] + PARALYTIC_TRAILING_CAP)
+    on = df[(df["med_dose"].fillna(0) > 0) & (~df["__stop"]) & (df["seg_end"] > df["admin_dttm"])][
+        ["encounter_block", "admin_dttm", "seg_end"]].rename(
+        columns={"admin_dttm": "on_start", "seg_end": "on_end"})
+    if on.empty:
+        base["on_paralytic"] = False
+        return base[cols]
+
+    con = duckdb.connect()
+    con.register("d", base)
+    con.register("p", on)
+    out = con.execute(
+        """
+        SELECT d.encounter_block AS encounter_block, d.icu_day AS icu_day,
+               COUNT(p.on_start) > 0 AS on_paralytic
+        FROM d LEFT JOIN p
+          ON d.encounter_block = p.encounter_block
+         AND p.on_start < d.day_out AND p.on_end > d.day_in
+        GROUP BY d.encounter_block, d.icu_day
+        """
+    ).fetchdf()
+    con.close()
+    out["on_paralytic"] = out["on_paralytic"].fillna(False).astype(bool)
+    return out[cols]

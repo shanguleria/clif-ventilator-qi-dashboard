@@ -84,14 +84,43 @@ def attach_periods(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 def _slice_metrics(g: pd.DataFrame) -> dict:
     elig = g["eligible"]
-    nontrach = g["eligibility_status"] != "excluded_trach"
-    return {
+    status = g["eligibility_status"]
+    nontrach = status != "excluded_trach"
+    rec = {
         "n_vent_days": int(len(g)),
         "n_nontrach": int(nontrach.sum()),
         "n_eligible": int(elig.sum()),
-        "n_not_assessable": int((g["eligibility_status"] == "not_assessable").sum()),
+        "n_not_assessable": int((status == "not_assessable").sum()),
+        "n_not_eligible": int((status == "not_eligible").sum()),
+        "n_excluded_paralytic": int((status == "excluded_paralytic").sum()),
+        # strict headline numerator (eligible & strict transition) — name kept for the
+        # tile feed + integrity checks; do not rename.
         "n_sbt": int((elig & g["sbt_delivered"]).sum()),
+        # three nested numerators × {all vent-ICU days, eligible days}
+        "n_sbt_all": int(g["sbt_delivered"].sum()),
+        "n_sbtany_all": int(g["sbt_delivered_any"].sum()),
+        "n_sbtany_elig": int((elig & g["sbt_delivered_any"]).sum()),
+        "n_spont_all": int(g["on_spontaneous"].sum()),
+        "n_spont_elig": int((elig & g["on_spontaneous"]).sum()),
     }
+    # patient-level (Both day + patient): nunique per slice — NOT additive across slices.
+    # Two numerator flavors per numerator so num ⊆ den in each denominator mode:
+    #   *_elig (ever event on an eligible day) ⊆ n_pts_elig ; *_all (ever event) ⊆ n_pts.
+    if "patient_id" in g.columns:
+        pid = g["patient_id"]
+        rec["n_pts"] = int(pid.nunique())
+        rec["n_pts_elig"] = int(pid[elig].nunique())
+        rec["n_pts_strict_all"] = int(pid[g["sbt_delivered"]].nunique())
+        rec["n_pts_strict_elig"] = int(pid[elig & g["sbt_delivered"]].nunique())
+        rec["n_pts_any_all"] = int(pid[g["sbt_delivered_any"]].nunique())
+        rec["n_pts_any_elig"] = int(pid[elig & g["sbt_delivered_any"]].nunique())
+        rec["n_pts_spont_all"] = int(pid[g["on_spontaneous"]].nunique())
+        rec["n_pts_spont_elig"] = int(pid[elig & g["on_spontaneous"]].nunique())
+    else:
+        for k in ("n_pts", "n_pts_elig", "n_pts_strict_all", "n_pts_strict_elig",
+                  "n_pts_any_all", "n_pts_any_elig", "n_pts_spont_all", "n_pts_spont_elig"):
+            rec[k] = 0
+    return rec
 
 
 def build_slice_cells(pl: pd.DataFrame) -> pd.DataFrame:
@@ -109,7 +138,10 @@ def build_slice_cells(pl: pd.DataFrame) -> pd.DataFrame:
                 emit(unit, gran, str(period), g)
 
     cols = ["unit", "granularity", "period", "n_vent_days", "n_nontrach",
-            "n_eligible", "n_not_assessable", "n_sbt"]
+            "n_eligible", "n_not_assessable", "n_not_eligible", "n_excluded_paralytic", "n_sbt",
+            "n_sbt_all", "n_sbtany_all", "n_sbtany_elig", "n_spont_all", "n_spont_elig",
+            "n_pts", "n_pts_elig", "n_pts_strict_all", "n_pts_strict_elig",
+            "n_pts_any_all", "n_pts_any_elig", "n_pts_spont_all", "n_pts_spont_elig"]
     df = pd.DataFrame(rows)[cols]
     df["rate_sbt"] = df["n_sbt"] / df["n_eligible"].replace(0, np.nan)
     df["rate_eligible_of_nontrach"] = df["n_eligible"] / df["n_nontrach"].replace(0, np.nan)
@@ -129,11 +161,32 @@ def build_summary_rows(site: str, m: dict) -> pd.DataFrame:
          _rate(m["n_eligible"], m["n_nontrach"]), ">=12h controlled + >=2h stable window"),
         ("not_assessable_days", "Not-assessable stability days (bound)", m["n_not_assessable"], m["n_nontrach"],
          _rate(m["n_not_assessable"], m["n_nontrach"]), "no scaffold hour with all 4 stability signals"),
+        ("excluded_paralytic_days", "Continuous-paralytic days (excluded)", m["n_excluded_paralytic"],
+         m["n_nontrach"], _rate(m["n_excluded_paralytic"], m["n_nontrach"]),
+         "continuous NMBA infusion; no respiratory drive -> justified exclusion"),
         ("sbt_delivered", "SBT delivered / eligible (HEADLINE)", m["n_sbt"], m["n_eligible"],
          _rate(m["n_sbt"], m["n_eligible"]), "controlled->support transition >= min duration"),
-        ("patients_eligible", "Patients with >=1 eligible day", m["n_pts_elig"], m["n_pts_elig"], 1.0, ""),
-        ("patients_ever_sbt", "Patients ever SBT / eligible patients", m["n_pts_sbt"], m["n_pts_elig"],
+        # --- liberal views (leadership ask) — all use the all-vent-ICU-days denominator ---
+        ("sbt_strict_all", "Strict SBT / all vent-ICU days", m["n_sbt_all"], m["n_vent_days"],
+         _rate(m["n_sbt_all"], m["n_vent_days"]), "transition >= min duration; liberal denominator"),
+        ("sbt_any_all", "SBT any-duration / all vent-ICU days", m["n_sbtany_all"], m["n_vent_days"],
+         _rate(m["n_sbtany_all"], m["n_vent_days"]), "controlled->support transition, any duration"),
+        ("sbt_any_elig", "SBT any-duration / eligible", m["n_sbtany_elig"], m["n_eligible"],
+         _rate(m["n_sbtany_elig"], m["n_eligible"]), "any-duration transition on eligible days"),
+        ("on_spont_all", "On a spontaneous mode / all vent-ICU days", m["n_spont_all"], m["n_vent_days"],
+         _rate(m["n_spont_all"], m["n_vent_days"]), "any support-mode time that day; no transition, no PEEP gate"),
+        ("on_spont_elig", "On a spontaneous mode / eligible", m["n_spont_elig"], m["n_eligible"],
+         _rate(m["n_spont_elig"], m["n_eligible"]), "any support-mode time on eligible days"),
+        # --- patient-level secondary framing ---
+        ("patients_cohort", "Ventilated-ICU patients", m["n_pts"], m["n_pts"], 1.0, ""),
+        ("patients_eligible", "Patients with >=1 eligible day", m["n_pts_elig"], m["n_pts"],
+         _rate(m["n_pts_elig"], m["n_pts"]), ""),
+        ("patients_ever_sbt", "Patients ever strict-SBT / eligible patients", m["n_pts_sbt"], m["n_pts_elig"],
          _rate(m["n_pts_sbt"], m["n_pts_elig"]), "patient-level secondary framing"),
+        ("patients_ever_sbt_any", "Patients ever SBT any-duration / vent-ICU patients",
+         m["n_pts_sbt_any"], m["n_pts"], _rate(m["n_pts_sbt_any"], m["n_pts"]), "patient-level, liberal"),
+        ("patients_ever_spont", "Patients ever on a spontaneous mode / vent-ICU patients",
+         m["n_pts_spont"], m["n_pts"], _rate(m["n_pts_spont"], m["n_pts"]), "patient-level, liberal"),
     ]
     df = pd.DataFrame(rows, columns=["metric", "label", "numerator", "denominator", "rate", "note"])
     df.insert(0, "site", site)
@@ -217,21 +270,33 @@ def _assert_phi_free(feed: dict) -> None:
 def _assert_slice_integrity(slices: pd.DataFrame, m: dict) -> None:
     a = slices[(slices["unit"] == "__ALL__") & (slices["granularity"] == "all")].iloc[0]
     for col, key in [("n_vent_days", "n_vent_days"), ("n_eligible", "n_eligible"),
-                     ("n_sbt", "n_sbt"), ("n_not_assessable", "n_not_assessable")]:
+                     ("n_sbt", "n_sbt"), ("n_not_assessable", "n_not_assessable"),
+                     ("n_sbt_all", "n_sbt_all"), ("n_sbtany_all", "n_sbtany_all"),
+                     ("n_spont_all", "n_spont_all")]:
         if int(a[col]) != int(m[key]):
             raise RuntimeError(f"slice __ALL__/all {col}={a[col]} != headline {m[key]}")
+    # additive day-count columns must sum to the total across units and across periods
+    additive = ["n_vent_days", "n_nontrach", "n_eligible", "n_sbt", "n_sbt_all",
+                "n_sbtany_all", "n_spont_all"]
     units_all = slices[(slices["granularity"] == "all") & (slices["unit"] != "__ALL__")]
-    if int(units_all["n_eligible"].sum()) != m["n_eligible"]:
-        raise RuntimeError("per-unit n_eligible does not sum to total")
+    for col in additive:
+        if int(units_all[col].sum()) != int(m[col]):
+            raise RuntimeError(f"per-unit {col} does not sum to total")
     for gran in GRANULARITY_COL:
         s = slices[(slices["unit"] == "__ALL__") & (slices["granularity"] == gran)]
-        if int(s["n_eligible"].sum()) != m["n_eligible"]:
-            raise RuntimeError(f"per-period ({gran}) n_eligible does not sum to total")
+        for col in additive:
+            if int(s[col].sum()) != int(m[col]):
+                raise RuntimeError(f"per-period ({gran}) {col} does not sum to total")
     # CONSORT funnel monotonicity (totals)
     if not (m["n_vent_days"] >= m["n_nontrach"] >= m["n_eligible"] >= m["n_sbt"]):
         raise RuntimeError("CONSORT funnel not monotone: "
                            f"vent={m['n_vent_days']} nontrach={m['n_nontrach']} "
                            f"elig={m['n_eligible']} sbt={m['n_sbt']}")
+    # numerator nesting (totals): strict ⊆ any-duration ⊆ on-spontaneous; eligible⊆all
+    if not (m["n_spont_all"] >= m["n_sbtany_all"] >= m["n_sbt_all"] >= m["n_sbt"]):
+        raise RuntimeError("numerator nesting violated: "
+                           f"spont={m['n_spont_all']} any={m['n_sbtany_all']} "
+                           f"strict_all={m['n_sbt_all']} strict_elig={m['n_sbt']}")
 
 
 def main() -> None:
@@ -259,16 +324,31 @@ def main() -> None:
     n_nontrach = int((obs["eligibility_status"] != "excluded_trach").sum())
     n_eligible = int(obs["eligible"].sum())
     n_not_assessable = int((obs["eligibility_status"] == "not_assessable").sum())
+    n_not_eligible = int((obs["eligibility_status"] == "not_eligible").sum())
+    n_excluded_paralytic = int((obs["eligibility_status"] == "excluded_paralytic").sum())
     n_sbt = int((obs["eligible"] & obs["sbt_delivered"]).sum())
+    # liberal numerators × {all vent-ICU days, eligible days}
+    n_sbt_all = int(obs["sbt_delivered"].sum())
+    n_sbtany_all = int(obs["sbt_delivered_any"].sum())
+    n_sbtany_elig = int((obs["eligible"] & obs["sbt_delivered_any"]).sum())
+    n_spont_all = int(obs["on_spontaneous"].sum())
+    n_spont_elig = int((obs["eligible"] & obs["on_spontaneous"]).sum())
     has_pid = "patient_id" in obs.columns
     elig_df = obs[obs["eligible"]]
+    n_pts = int(obs["patient_id"].nunique()) if has_pid else 0
     n_pts_elig = int(elig_df["patient_id"].nunique()) if has_pid else 0
     n_pts_sbt = int(elig_df.loc[elig_df["sbt_delivered"], "patient_id"].nunique()) if has_pid else 0
+    n_pts_sbt_any = int(obs.loc[obs["sbt_delivered_any"], "patient_id"].nunique()) if has_pid else 0
+    n_pts_spont = int(obs.loc[obs["on_spontaneous"], "patient_id"].nunique()) if has_pid else 0
 
     generated = _dt.datetime.now().isoformat(timespec="minutes")
     m = {"n_vent_days": n_vent_days, "n_nontrach": n_nontrach, "n_eligible": n_eligible,
-         "n_not_assessable": n_not_assessable, "n_sbt": n_sbt,
-         "n_pts_elig": n_pts_elig, "n_pts_sbt": n_pts_sbt, "generated": generated}
+         "n_not_assessable": n_not_assessable, "n_not_eligible": n_not_eligible,
+         "n_excluded_paralytic": n_excluded_paralytic, "n_sbt": n_sbt,
+         "n_sbt_all": n_sbt_all, "n_sbtany_all": n_sbtany_all, "n_sbtany_elig": n_sbtany_elig,
+         "n_spont_all": n_spont_all, "n_spont_elig": n_spont_elig,
+         "n_pts": n_pts, "n_pts_elig": n_pts_elig, "n_pts_sbt": n_pts_sbt,
+         "n_pts_sbt_any": n_pts_sbt_any, "n_pts_spont": n_pts_spont, "generated": generated}
 
     slices = build_slice_cells(obs)
     _assert_slice_integrity(slices, m)
@@ -289,6 +369,7 @@ def main() -> None:
 
     log.info("ventilated-ICU patient-days:   %6d", n_vent_days)
     log.info("non-trach vent-ICU days:       %6d (%.1f%%)", n_nontrach, 100 * _rate(n_nontrach, n_vent_days))
+    log.info("continuous-paralytic days:     %6d (excluded from eligible denominator)", n_excluded_paralytic)
     log.info("eligible SBT-opportunity days: %6d (%.1f%% of non-trach)",
              n_eligible, 100 * _rate(n_eligible, n_nontrach) if n_nontrach else 0)
     log.info("not-assessable stability days: %6d", n_not_assessable)
@@ -296,6 +377,12 @@ def main() -> None:
              n_sbt, 100 * _rate(n_sbt, n_eligible) if n_eligible else 0)
     log.info("patients ever SBT / eligible:  %6d / %d (%.1f%%)", n_pts_sbt, n_pts_elig,
              100 * _rate(n_pts_sbt, n_pts_elig) if n_pts_elig else 0)
+    log.info("--- liberal views (denominator = all %d vent-ICU days) ---", n_vent_days)
+    log.info("  strict SBT:        %6d (%.1f%%)", n_sbt_all, 100 * _rate(n_sbt_all, n_vent_days))
+    log.info("  SBT any duration:  %6d (%.1f%%)", n_sbtany_all, 100 * _rate(n_sbtany_all, n_vent_days))
+    log.info("  on spontaneous:    %6d (%.1f%%)", n_spont_all, 100 * _rate(n_spont_all, n_vent_days))
+    log.info("  patients ever on spontaneous: %d / %d (%.1f%%)", n_pts_spont, n_pts,
+             100 * _rate(n_pts_spont, n_pts) if n_pts else 0)
     log.info("wrote: metrics_site_summary.csv, metrics_slices.csv, tile_feed_sbt.json "
              "(PHI-free; grain units=%d periods=%s)",
              len(feed["grain"]["units"]), ",".join(feed["grain"]["periods"]))

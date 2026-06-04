@@ -44,6 +44,16 @@ A ventilated-ICU patient-day is eligible iff **all** hold:
 - **Not tracheostomized that day.** Trach patients are excluded from numerator **and** denominator (the
   waterfall's forward-filled `tracheostomy` flag). Continuous-spontaneous / never-controlled patients
   are excluded automatically by the ≥12h-controlled gate.
+- **Not on a continuous paralytic that day** (added 2026-06-04, per leadership). A continuous
+  neuromuscular blocker abolishes respiratory drive, so a paralyzed day is not an SBT candidate →
+  status `excluded_paralytic`, dropped from the eligible denominator and shown as a **justified**
+  exclusion in the decomposition (analogous to deep sedation precluding an SAT). A day is flagged if it
+  overlaps a continuous-NMBA infusion (`med_dose>0`, not a `stop` mar_action; carried forward to the
+  next record, trailing capped 24h) — `sbt_detect.paralytic_day_flag`, categories in config
+  `sbt_paralytics.paralytic_categories` (UChicago: cisatracurium + rocuronium; 1,659 days). Set
+  `sbt_eligibility.exclude_paralytic_days: false` to disable. Bolus paralytics (in
+  `medication_admin_intermittent`) are **intentionally out of scope** (leadership-confirmed 2026-06-04) —
+  transient bolus dosing does not make a patient-day a non-candidate. Priority: trach > paralytic > stability/accrual.
 
 A day whose stability is **un-assessable** (no scaffold hour has all four signals present) is reported
 as a separate `not_assessable` bound, excluded from the rate denominator (mirrors LPV's `not_assessable`).
@@ -59,22 +69,41 @@ NEE timeline is the sum of concurrent per-drug step functions, sampled onto scaf
 pressor with missing weight makes that hour **un-assessable** (not silently 0). Swap to Jain's exact
 factors in config if obtained.
 
-### SBT delivered (numerator) — transition-only
-On an eligible day, a **controlled→support mode transition** sustained ≥ `support_min_minutes` (default
-2), where the support episode is `pressure support/cpap` with **PEEP ≤ 8** (pressure-support arm) or
-**PEEP ≤ 5** (CPAP arm). Detection runs on the **native-resolution** waterfall rows (not the hourly
-scaffold) so sub-hourly trials are visible where charted. **Transition-only** (user decision): a patient
-parked on support all day with no controlled→support edge does **not** count.
+### SBT delivered (numerators) — strict (Jain headline) + two liberal views
+The **strict** numerator (the by-the-book Jain headline) is a **controlled→support mode transition**
+sustained ≥ `support_min_minutes` (default 2), where the support episode is `pressure support/cpap` with
+**PEEP ≤ 8** (pressure-support arm) or **PEEP ≤ 5** (CPAP arm). Detection runs on the
+**native-resolution** waterfall rows (not the hourly scaffold) so sub-hourly trials are visible where
+charted. Transition-only: a patient parked on support all day with no controlled→support edge does **not**
+count toward the strict numerator.
+
+Per leadership (2026-06-04), to see "what is actually happening" the dashboard surfaces **three nested
+numerators** (`strict ⊆ any-duration ⊆ on-spontaneous`, asserted in 03/04) against **two denominators**
+(eligible days, or all vent-ICU days), with a Numerator × Denominator toggle:
+- **`sbt_delivered`** — strict transition ≥ `support_min_minutes` (above).
+- **`sbt_delivered_any`** — a controlled→support transition of **any duration** (drops only the ≥2-min
+  floor; arm/PEEP qualification kept). At UChicago this barely exceeds strict — almost all trials already
+  last ≥2 min, so the floor is not the binding constraint.
+- **`on_spontaneous`** — on **any** support mode at all that day (no transition required, **no PEEP gate**);
+  a patient parked on pressure-support/CPAP counts here only. This is the broadest prevalence view and
+  is ~2× the transition rate, capturing never-controlled / parked-on-support patients.
+
+The dashboard's **"Where the Vent-ICU Days Go"** panel decomposes all vent-ICU days into received / eligible-
+but-no-trial (missed) / not-eligible (justified by exclusion), with the "% of non-SBT days justified" call-
+out. Patient-level (`Both day + patient`) secondary stats accompany each view (numerator matched to the
+denominator mode so num ⊆ den). The strict-SBT / eligible-days view remains the scorecard tile headline.
 
 ### Documentation / data-quality caveats (carried in the tile `note`)
 - **Charting cadence:** a ≥2-min support episode can be invisible at sites charting ventilator settings
   only hourly → delivery is a **lower bound**. `pct_native` (share of support readings from native vs
   scaffold rows) is surfaced as a coverage diagnostic.
 - **CPAP pressure** is read from `peep_set` — CLIF `respiratory_support` has no dedicated CPAP column.
-- **Sedation scope:** the cohort reuses the SAT vertical's warm waterfall cache (ICU ∩ SAT-sedation
-  hospitalizations). Essentially all controlled-vent patients are sedated, so coverage is near-complete;
-  a few never-sedated ventilated-ICU patients are not represented (`cohort.seed_cache_from` → null +
-  `--refresh-waterfall` builds the full ICU∩IMV cohort).
+- **Cohort scope (resolved 2026-06-04):** SBT now builds its **own** full ICU∩IMV respiratory_support
+  waterfall (`cohort.seed_cache_from: null`) over all 41,179 ICU encounter-blocks — it no longer reuses the
+  SAT vertical's SAT-sedation-scoped cache, which silently dropped never-sedated ventilated-ICU patients.
+  The complete cohort is **110,898 vent-ICU days / 18,060 blocks / 16,504 patients** (was 105,665 days under
+  the seeded cache). Those added patients matter most to the liberal `on_spontaneous` view and the
+  all-vent-days denominator. Rebuild cost ~35–45 min (`python code/01_build_cohort.py`, empty `_cache/`).
 
 ### Unit & time-period slicing (dashboard filters)
 - **Unit** = ICU `location_type` of the patient-day (attached per day in 01).
@@ -130,7 +159,7 @@ run_pipeline.sh             # entry point — uses the bundle-root shared .venv
 | `hospitalization` | admission/discharge times, age_at_admission |
 | `adt` | ICU localization (`location_category == "icu"`), unit (`location_type`) |
 | `respiratory_support` | waterfall: device (`imv`), `mode_category` (controlled vs support), `fio2_set`, `peep_set`, `pressure_support_set`, `tracheostomy` |
-| `medication_admin_continuous` | vasopressors (norepinephrine-equivalent for the stability screen) |
+| `medication_admin_continuous` | vasopressors (norepinephrine-equivalent for the stability screen) + continuous paralytics (NMBA, the `excluded_paralytic` eligibility exclusion) |
 | `vitals` | `spo2` (stability screen) + `weight_kg` (vasopressor mcg/kg/min normalization) |
 
 Primary dataset: **UChicago CLIF v2.1.0**. Secondary (validation): **MIMIC-IV CLIF v1.1.0**.
@@ -144,9 +173,11 @@ The pipeline is **config-driven** — no hard-coded paths. Other sites copy `con
 - **Cohort / loader / waterfall machinery** is adapted from the sibling **SAT** vertical
   (`../sat/code/01_build_cohort.py`): `build_orchestrator`, `_coerce_dttm`, `stitch_cached`,
   `waterfall_cached` + `_normalize_waterfall`, `build_imv_intervals`/`build_icu_intervals`/
-  `intersect_imv_icu`/`expand_to_days`/`attach_demographics`. The cohort is the **same**
-  ventilated-ICU patient-day universe, so SBT **seeds its `_cache/` from SAT's** (config
-  `cohort.seed_cache_from`) to skip the ~35-min waterfall.
+  `intersect_imv_icu`/`expand_to_days`/`attach_demographics`. The cohort is the same vent-ICU
+  patient-day **universe** as SAT, but SBT builds its **own** full ICU∩IMV waterfall
+  (`cohort.seed_cache_from: null`) rather than seeding from SAT's sedation-scoped cache — see the
+  Cohort-scope caveat above. `seed_cache_from` can still point at a sibling `_cache/` to skip the
+  ~35-min waterfall if that scope caveat is acceptable.
 - **SpO2 load + merge_asof backward** pattern from `../lpv/code/02d_severity.py`.
 - **Vasopressor unit/weight standardization** from clifpy `unit_converter.standardize_dose_to_base_units`.
 - **Metrics / slice / tile-feed machinery** adapted from `../sat/code/04_metrics.py`
