@@ -151,6 +151,8 @@ def main() -> None:
     out["trach_day"] = out["trach_day"].fillna(False).astype(bool)
     out["on_paralytic"] = out["on_paralytic"].fillna(False).astype(bool)
     out["stable_window"] = out["stable_window"].fillna(False).astype(bool)
+    out["stable_window_no_ne"] = out["stable_window_no_ne"].fillna(False).astype(bool)
+    out["stable_window_ne_only"] = out["stable_window_ne_only"].fillna(False).astype(bool)
     for c in ("n_stable_hours", "n_scaffold_hours", "n_assessable_hours"):
         out[c] = out[c].fillna(0).astype(int)
 
@@ -172,6 +174,36 @@ def main() -> None:
     )
     out["eligible"] = out["eligibility_status"] == "eligible"
 
+    # ---- exclusion-toggle model: raw per-day DENOMINATOR bits (plan 04) --------------
+    # Stored raw (NOT config-gated) so the dashboard toggles decide what to apply. The
+    # legacy eligibility_status/notelig_reason above stay for the (unchanged) tile feed.
+    #   db_trach     — tracheostomized that day              (toggle: exclude trach)
+    #   db_paralytic — continuous NMBA that day              (toggle: exclude paralytic)
+    #   db_accrued12 — >=12h controlled accrued before day   (toggle: require >=12h controlled)
+    #   db_stable_oxy/_vaso/_both — >=2h stable-physiology window for the active criterion set
+    out["db_trach"] = out["trach_day"].astype(bool)
+    out["db_paralytic"] = out["on_paralytic"].astype(bool)
+    out["db_accrued12"] = out["accrued_12h"].astype(bool)
+    out["db_stable_oxy"] = out["stable_window_no_ne"].astype(bool)
+    out["db_stable_vaso"] = out["stable_window_ne_only"].astype(bool)
+    out["db_stable_both"] = out["stable_window"].astype(bool)
+
+    # Subdivide the not_eligible bucket into its driver (for the dashboard "Why not
+    # eligible?" sub-bar + cross-site denominator harmonization). Precedence: the
+    # <12h-controlled accrual gate is sequential-first (stability is only assessed once
+    # 12h has accrued), so it wins; among stability failures, "vasopressor" = a day a site
+    # NOT screening on pressors would have called eligible (relaxing NE alone yields a >=2h
+    # stable window). Within not_eligible & accrued_12h, stable_window is False by
+    # construction and assessable hours exist (else not_assessable), so the split is exact.
+    notelig = out["eligibility_status"] == "not_eligible"
+    cond_lt12 = notelig & (~out["accrued_12h"])
+    cond_vaso = notelig & out["accrued_12h"] & out["stable_window_no_ne"]
+    out["notelig_reason"] = np.select(
+        [~notelig, cond_lt12, cond_vaso],
+        ["", "lt12h_controlled", "failed_vasopressor"],
+        default="failed_oxy_peep",
+    )
+
     out.to_parquet(inter / "sbt_eligibility.parquet", index=False)
 
     # ---- log ----
@@ -183,6 +215,13 @@ def main() -> None:
     vc = out["eligibility_status"].value_counts()
     n_elig = int(vc.get("eligible", 0))
     n_notassess = int(vc.get("not_assessable", 0))
+    n_notelig = int(vc.get("not_eligible", 0))
+    rc = out.loc[notelig, "notelig_reason"].value_counts()
+    n_rc_lt12 = int(rc.get("lt12h_controlled", 0))
+    n_rc_vaso = int(rc.get("failed_vasopressor", 0))
+    n_rc_oxy = int(rc.get("failed_oxy_peep", 0))
+    assert n_rc_lt12 + n_rc_vaso + n_rc_oxy == n_notelig, \
+        f"notelig_reason partition {n_rc_lt12 + n_rc_vaso + n_rc_oxy} != not_eligible {n_notelig}"
     log.info("vent-ICU days:                 %6d", n)
     log.info("  tracheostomized (excluded):  %6d", n_trach)
     log.info("  continuous paralytic (excl): %6d", n_paral)
@@ -190,6 +229,8 @@ def main() -> None:
     log.info("  >=%dh controlled accrued (non-trach, non-paralytic): %6d (%.1f%% of non-trach)",
              ctrl_min_h, n_accrued, 100 * n_accrued / max(n_nontrach, 1))
     log.info("  not_assessable stability:    %6d", n_notassess)
+    log.info("  not_eligible breakdown:      %6d  (<12h controlled %d | vasopressor %d | oxy/PEEP %d)",
+             n_notelig, n_rc_lt12, n_rc_vaso, n_rc_oxy)
     log.info("ELIGIBLE SBT-opportunity days: %6d (%.1f%% of non-trach vent-ICU days)",
              n_elig, 100 * n_elig / max(n_nontrach, 1))
     log.info("wrote: sbt_eligibility.parquet")

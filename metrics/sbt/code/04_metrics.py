@@ -41,6 +41,12 @@ CANONICAL_UNITS = [
     "mixed_neuro_icu", "general_icu", "burn_icu",
 ]
 GRANULARITY_COL = {"month": "period_month", "week": "period_week"}
+# Exclusion-toggle model (plan 04): stable bit order for the per-day criterion mask.
+# The dashboard JS engine references bits by this exact name->index order. 6 denominator
+# bits + 8 numerator-subset bits (on_spontaneous = the empty subset).
+MASK_BITS = ["db_trach", "db_paralytic", "db_accrued12",
+             "db_stable_oxy", "db_stable_vaso", "db_stable_both",
+             "on_spontaneous", "nb_t", "nb_d", "nb_p", "nb_td", "nb_tp", "nb_dp", "nb_tdp"]
 TILE_SCHEMA_VERSION = 1
 DEFINITION_VERSION = "sbt-v1"
 PHI_FORBIDDEN = ("hospitalization_id", "patient_id")
@@ -90,8 +96,15 @@ def _slice_metrics(g: pd.DataFrame) -> dict:
         "n_vent_days": int(len(g)),
         "n_nontrach": int(nontrach.sum()),
         "n_eligible": int(elig.sum()),
+        # eligible AND a transition candidate (drop eligible days parked on a spontaneous mode with
+        # no transition) — the scorecard-tile denominator under the "require transition" den+num rule.
+        "n_eligible_txcand": int((elig & ~(g["on_spontaneous"] & ~g["nb_t"])).sum()),
         "n_not_assessable": int((status == "not_assessable").sum()),
         "n_not_eligible": int((status == "not_eligible").sum()),
+        # not_eligible subdivided by driver (partitions n_not_eligible; vasopressor split out)
+        "n_notelig_lt12h": int((g["notelig_reason"] == "lt12h_controlled").sum()),
+        "n_notelig_vaso": int((g["notelig_reason"] == "failed_vasopressor").sum()),
+        "n_notelig_oxypeep": int((g["notelig_reason"] == "failed_oxy_peep").sum()),
         "n_excluded_paralytic": int((status == "excluded_paralytic").sum()),
         # strict headline numerator (eligible & strict transition) — name kept for the
         # tile feed + integrity checks; do not rename.
@@ -138,14 +151,44 @@ def build_slice_cells(pl: pd.DataFrame) -> pd.DataFrame:
                 emit(unit, gran, str(period), g)
 
     cols = ["unit", "granularity", "period", "n_vent_days", "n_nontrach",
-            "n_eligible", "n_not_assessable", "n_not_eligible", "n_excluded_paralytic", "n_sbt",
+            "n_eligible", "n_eligible_txcand", "n_not_assessable", "n_not_eligible",
+            "n_notelig_lt12h", "n_notelig_vaso", "n_notelig_oxypeep", "n_excluded_paralytic", "n_sbt",
             "n_sbt_all", "n_sbtany_all", "n_sbtany_elig", "n_spont_all", "n_spont_elig",
             "n_pts", "n_pts_elig", "n_pts_strict_all", "n_pts_strict_elig",
             "n_pts_any_all", "n_pts_any_elig", "n_pts_spont_all", "n_pts_spont_elig"]
     df = pd.DataFrame(rows)[cols]
+    # not_eligible sub-reasons partition n_not_eligible in every slice
+    _part = df["n_notelig_lt12h"] + df["n_notelig_vaso"] + df["n_notelig_oxypeep"]
+    if not (_part == df["n_not_eligible"]).all():
+        raise RuntimeError("not_eligible sub-reason partition mismatch in a slice")
     df["rate_sbt"] = df["n_sbt"] / df["n_eligible"].replace(0, np.nan)
     df["rate_eligible_of_nontrach"] = df["n_eligible"] / df["n_nontrach"].replace(0, np.nan)
     return df.sort_values(["unit", "granularity", "period"]).reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# Exclusion-toggle criterion-mask histogram (plan 04) — the dashboard computes
+# num/den LIVE in JS from this; PHI-free (counts of days per 14-bit mask per slice).
+# ---------------------------------------------------------------------------
+def build_mask_histogram(obs: pd.DataFrame) -> pd.DataFrame:
+    df = obs.copy()
+    m = np.zeros(len(df), dtype=np.int64)
+    for i, col in enumerate(MASK_BITS):
+        m |= (df[col].astype(bool).to_numpy().astype(np.int64) << i)
+    df = df.assign(mask=m)
+    rows = []
+
+    def emit(unit, gran, period, g):
+        for mask_val, cnt in g["mask"].value_counts().items():
+            rows.append({"unit": unit, "granularity": gran, "period": period,
+                         "mask": int(mask_val), "count": int(cnt)})
+
+    for unit, gu in [("__ALL__", df)] + list(df.groupby("unit", observed=True)):
+        emit(unit, "all", "all", gu)
+        for gran, col in GRANULARITY_COL.items():
+            for period, g in gu.groupby(col, observed=True):
+                emit(unit, gran, str(period), g)
+    return pd.DataFrame(rows, columns=["unit", "granularity", "period", "mask", "count"])
 
 
 # ---------------------------------------------------------------------------
@@ -157,15 +200,29 @@ def build_summary_rows(site: str, m: dict) -> pd.DataFrame:
          "IMV ∩ ICU, day-expanded"),
         ("nontrach_days", "Non-tracheostomized vent-ICU days", m["n_nontrach"], m["n_vent_days"],
          _rate(m["n_nontrach"], m["n_vent_days"]), "trach days excluded from num & den"),
-        ("eligible_days", "Eligible SBT-opportunity days (denominator)", m["n_eligible"], m["n_nontrach"],
+        ("eligible_days", "Eligible SBT-opportunity days", m["n_eligible"], m["n_nontrach"],
          _rate(m["n_eligible"], m["n_nontrach"]), ">=12h controlled + >=2h stable window"),
+        ("eligible_txcand_days", "Eligible transition-candidate days (tile denominator)",
+         m["n_eligible_txcand"], m["n_nontrach"], _rate(m["n_eligible_txcand"], m["n_nontrach"]),
+         "eligible minus days parked on a spontaneous mode with no transition"),
         ("not_assessable_days", "Not-assessable stability days (bound)", m["n_not_assessable"], m["n_nontrach"],
          _rate(m["n_not_assessable"], m["n_nontrach"]), "no scaffold hour with all 4 stability signals"),
+        # not_eligible subdivided by driver (federation: lets sites harmonize the denominator)
+        ("notelig_lt12h_days", "Not eligible — <12h controlled accrued", m["n_notelig_lt12h"], m["n_nontrach"],
+         _rate(m["n_notelig_lt12h"], m["n_nontrach"]), "controlled-vent accrual gate not met"),
+        ("notelig_vaso_days", "Not eligible — vasopressor (NEE>0.2)", m["n_notelig_vaso"], m["n_nontrach"],
+         _rate(m["n_notelig_vaso"], m["n_nontrach"]),
+         "stability failed on pressors only; a site not screening on pressors would call eligible"),
+        ("notelig_oxypeep_days", "Not eligible — oxygenation/PEEP", m["n_notelig_oxypeep"], m["n_nontrach"],
+         _rate(m["n_notelig_oxypeep"], m["n_nontrach"]), "stability failed on FiO2/PEEP/SpO2"),
         ("excluded_paralytic_days", "Continuous-paralytic days (excluded)", m["n_excluded_paralytic"],
          m["n_nontrach"], _rate(m["n_excluded_paralytic"], m["n_nontrach"]),
          "continuous NMBA infusion; no respiratory drive -> justified exclusion"),
-        ("sbt_delivered", "SBT delivered / eligible (HEADLINE)", m["n_sbt"], m["n_eligible"],
-         _rate(m["n_sbt"], m["n_eligible"]), "controlled->support transition >= min duration"),
+        ("sbt_delivered", "SBT delivered / transition-candidate days (HEADLINE)", m["n_sbt"],
+         m["n_eligible_txcand"], _rate(m["n_sbt"], m["n_eligible_txcand"]),
+         "controlled->support transition >= min duration; tile headline"),
+        ("sbt_delivered_legacy", "SBT delivered / all eligible (legacy)", m["n_sbt"], m["n_eligible"],
+         _rate(m["n_sbt"], m["n_eligible"]), "parked-on-spontaneous days kept in denominator"),
         # --- liberal views (leadership ask) — all use the all-vent-ICU-days denominator ---
         ("sbt_strict_all", "Strict SBT / all vent-ICU days", m["n_sbt_all"], m["n_vent_days"],
          _rate(m["n_sbt_all"], m["n_vent_days"]), "transition >= min duration; liberal denominator"),
@@ -230,22 +287,24 @@ def build_tile_feed(cfg: dict, m: dict, slices: pd.DataFrame, diag: dict) -> dic
         "schema_version": TILE_SCHEMA_VERSION,
         "metric_id": "sbt",
         "title": "Spontaneous Breathing Trial",
-        "subtitle": "Controlled→support transition on eligible vent-days (Jain et al.)",
+        "subtitle": "Controlled→support transition among transition-candidate vent-days",
         "icon": "sbt",
         "detail_href": "sbt_dashboard.html",
         "goal": None,
         "generated": m["generated"],
-        "note": ("• Eligible = ≥12 h controlled + ≥2 h stable window, non-trach, non-paralytic "
-                 f"({cov_pct:.0f}% of non-trach vent-ICU days)"
+        "note": ("• Denominator = eligible transition candidates: ≥12 h controlled + ≥2 h stable window "
+                 "(FiO₂/PEEP/SpO₂ + NEE≤0.2), non-trach, non-paralytic, excluding days already parked on a "
+                 "spontaneous mode with no transition"
                  "• Donut = strict SBT (controlled→support transition ≥2 min); bars = any-length SBT "
                  "and on a spontaneous mode (of eligible days / of all vent-days)"
-                 "• Transition rates are a lower bound where charting is hourly; CPAP read from PEEP"),
+                 "• Transition rates are a lower bound where charting is hourly; CPAP read from PEEP"
+                 "• The detail dashboard makes every exclusion togglable"),
         "grain": {"units": units, "periods": ["all", "month", "week"]},
         "headline": {
             "label": "SBT delivered",
-            "den_label": "of eligible vent-days",
+            "den_label": "of transition-candidate vent-days",
             "n_unit": "patient-days",
-            "cells": cells("n_sbt", "n_eligible", with_n=True),
+            "cells": cells("n_sbt", "n_eligible_txcand", with_n=True),
         },
         # Mini-bars: the other SBT views vs the strict-delivery donut (react to the selector).
         "segments": [
@@ -329,8 +388,14 @@ def main() -> None:
     n_vent_days = int(len(obs))
     n_nontrach = int((obs["eligibility_status"] != "excluded_trach").sum())
     n_eligible = int(obs["eligible"].sum())
+    n_eligible_txcand = int((obs["eligible"] & ~(obs["on_spontaneous"] & ~obs["nb_t"])).sum())
     n_not_assessable = int((obs["eligibility_status"] == "not_assessable").sum())
     n_not_eligible = int((obs["eligibility_status"] == "not_eligible").sum())
+    n_notelig_lt12h = int((obs["notelig_reason"] == "lt12h_controlled").sum())
+    n_notelig_vaso = int((obs["notelig_reason"] == "failed_vasopressor").sum())
+    n_notelig_oxypeep = int((obs["notelig_reason"] == "failed_oxy_peep").sum())
+    assert n_notelig_lt12h + n_notelig_vaso + n_notelig_oxypeep == n_not_eligible, \
+        "not_eligible sub-reason partition does not sum to n_not_eligible"
     n_excluded_paralytic = int((obs["eligibility_status"] == "excluded_paralytic").sum())
     n_sbt = int((obs["eligible"] & obs["sbt_delivered"]).sum())
     # liberal numerators × {all vent-ICU days, eligible days}
@@ -349,7 +414,10 @@ def main() -> None:
 
     generated = _dt.datetime.now().isoformat(timespec="minutes")
     m = {"n_vent_days": n_vent_days, "n_nontrach": n_nontrach, "n_eligible": n_eligible,
+         "n_eligible_txcand": n_eligible_txcand,
          "n_not_assessable": n_not_assessable, "n_not_eligible": n_not_eligible,
+         "n_notelig_lt12h": n_notelig_lt12h, "n_notelig_vaso": n_notelig_vaso,
+         "n_notelig_oxypeep": n_notelig_oxypeep,
          "n_excluded_paralytic": n_excluded_paralytic, "n_sbt": n_sbt,
          "n_sbt_all": n_sbt_all, "n_sbtany_all": n_sbtany_all, "n_sbtany_elig": n_sbtany_elig,
          "n_spont_all": n_spont_all, "n_spont_elig": n_spont_elig,
@@ -361,6 +429,22 @@ def main() -> None:
 
     obs.to_parquet(inter / "metrics_patient_day_level.parquet", index=False)
     slices.to_parquet(inter / "metrics_slices.parquet", index=False)
+
+    # Exclusion-toggle criterion-mask histogram (the dashboard slices live in JS off this).
+    masks = build_mask_histogram(obs)
+    # Integrity: every slice's mask counts must sum to that slice's n_vent_days.
+    chk = (masks.groupby(["unit", "granularity", "period"])["count"].sum()
+                .reset_index(name="m_sum")
+                .merge(slices[["unit", "granularity", "period", "n_vent_days"]],
+                       on=["unit", "granularity", "period"], how="outer"))
+    bad = chk[chk["m_sum"].fillna(0) != chk["n_vent_days"].fillna(0)]
+    if len(bad):
+        raise RuntimeError(f"mask-histogram slice sums != n_vent_days on {len(bad)} slices")
+    masks.to_parquet(inter / "metrics_masks.parquet", index=False)
+    (inter / "metrics_masks_bits.json").write_text(json.dumps(MASK_BITS))   # bit-order contract for 05
+    log.info("mask histogram: %d (slice,mask) rows · %d distinct masks · %d slices",
+             len(masks), masks["mask"].nunique(),
+             masks[["unit", "granularity", "period"]].drop_duplicates().shape[0])
 
     summary = build_summary_rows(site, m)
     summary.to_csv(final / "metrics_site_summary.csv", index=False)
@@ -379,8 +463,10 @@ def main() -> None:
     log.info("eligible SBT-opportunity days: %6d (%.1f%% of non-trach)",
              n_eligible, 100 * _rate(n_eligible, n_nontrach) if n_nontrach else 0)
     log.info("not-assessable stability days: %6d", n_not_assessable)
-    log.info("SBT delivered / eligible:      %6d (%.1f%%)  [HEADLINE]",
-             n_sbt, 100 * _rate(n_sbt, n_eligible) if n_eligible else 0)
+    log.info("SBT delivered / transition-candidate days: %6d / %d (%.1f%%)  [TILE HEADLINE]",
+             n_sbt, n_eligible_txcand, 100 * _rate(n_sbt, n_eligible_txcand) if n_eligible_txcand else 0)
+    log.info("  (legacy SBT / all eligible:               %6d / %d (%.1f%%))",
+             n_sbt, n_eligible, 100 * _rate(n_sbt, n_eligible) if n_eligible else 0)
     log.info("patients ever SBT / eligible:  %6d / %d (%.1f%%)", n_pts_sbt, n_pts_elig,
              100 * _rate(n_pts_sbt, n_pts_elig) if n_pts_elig else 0)
     log.info("--- liberal views (denominator = all %d vent-ICU days) ---", n_vent_days)

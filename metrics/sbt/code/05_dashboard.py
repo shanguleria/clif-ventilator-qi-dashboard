@@ -232,64 +232,14 @@ def build_table1(pt: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=cols)
 
 
-# --- figures ---
-def make_consort(counts: dict, graphs_dir: Path) -> str:
-    import matplotlib; matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
-    elig = max(counts["eligible"], 1)
-    stages = [
-        ("Ventilated-ICU Patient-Days", counts["vent"], None),
-        ("Non-Tracheostomized Days", counts["nontrach"],
-         f"{counts['vent']-counts['nontrach']:,} tracheostomized (excluded)"),
-        ("Eligible SBT-Opportunity Days", counts["eligible"],
-         f"{counts['nontrach']-counts['eligible']:,} <12h controlled, no stable window, or paralytic"),
-        ("SBT Delivered", counts["sbt"],
-         f"{counts['eligible']-counts['sbt']:,} no controlled→support transition"),
-    ]
-    fig, ax = plt.subplots(figsize=(7.8, 6.0))
-    ax.set_xlim(0, 10); ax.set_ylim(0, 10); ax.axis("off"); fig.patch.set_facecolor(CARD)
-    box_w, box_h, cx = 5.4, 1.15, 3.0
-    ys = np.linspace(8.8, 0.9, len(stages))
-    for i, (label, n, excl) in enumerate(stages):
-        y = ys[i]
-        ax.add_patch(FancyBboxPatch((cx - box_w/2, y - box_h/2), box_w, box_h,
-                    boxstyle="round,pad=0.02,rounding_size=0.12", linewidth=1.3,
-                    edgecolor=MAROON_D, facecolor=CREAM))
-        ax.text(cx, y + 0.16, label, ha="center", va="center", fontsize=12,
-                fontweight="bold", color=MAROON_D)
-        pct = f"  ({100*n/elig:.1f}% of eligible)" if label == "SBT Delivered" else ""
-        ax.text(cx, y - 0.26, f"n = {n:,}{pct}", ha="center", va="center", fontsize=11, color=INK)
-        if i < len(stages) - 1:
-            ax.add_patch(FancyArrowPatch((cx, y - box_h/2), (cx, ys[i+1] + box_h/2),
-                        arrowstyle="-|>", mutation_scale=14, linewidth=1.2, color=MUTED))
-        if excl:
-            ax.annotate(excl, xy=(cx, (ys[i-1] + y) / 2 if i else y),
-                        xytext=(cx + box_w/2 + 0.2, (ys[i-1] + y) / 2 if i else y),
-                        ha="left", va="center", fontsize=8.0, color=MUTED)
-    fig.tight_layout(); graphs_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(graphs_dir / "cohort_consort.png", dpi=150, bbox_inches="tight", facecolor=CARD)
-    fig.savefig(graphs_dir / "cohort_consort.svg", bbox_inches="tight", facecolor=CARD)
-    return _fig_to_uri(fig)
-
-
-# --- slices → embedded JS ---
-def build_slices_js(slices: pd.DataFrame) -> dict:
+# --- criterion-mask histogram → embedded JS (the exclusion-toggle engine reads this) ---
+def build_masks_js(masks: pd.DataFrame) -> dict:
+    """Nested {unit:{granularity:{period:[[mask,count],...]}}} — the exclusion-toggle engine
+    sums these live in JS per the active toggles. PHI-free (day counts per criterion mask)."""
     out: dict = {}
-    for r in slices.itertuples(index=False):
-        cell = {"vent": int(r.n_vent_days), "nontrach": int(r.n_nontrach),
-                "elig": int(r.n_eligible), "sbt": int(r.n_sbt),
-                "notassess": int(r.n_not_assessable), "noelig": int(r.n_not_eligible),
-                # three numerators × {all vent-ICU days, eligible days}
-                "sbt_all": int(r.n_sbt_all),
-                "sbtany_all": int(r.n_sbtany_all), "sbtany_elig": int(r.n_sbtany_elig),
-                "spont_all": int(r.n_spont_all), "spont_elig": int(r.n_spont_elig),
-                # patient-level (not additive across slices); _elig ⊆ pts_elig, _all ⊆ pts
-                "pts": int(r.n_pts), "pts_elig": int(r.n_pts_elig),
-                "pts_strict_all": int(r.n_pts_strict_all), "pts_strict_elig": int(r.n_pts_strict_elig),
-                "pts_any_all": int(r.n_pts_any_all), "pts_any_elig": int(r.n_pts_any_elig),
-                "pts_spont_all": int(r.n_pts_spont_all), "pts_spont_elig": int(r.n_pts_spont_elig)}
-        out.setdefault(r.unit, {}).setdefault(r.granularity, {})[r.period] = cell
+    for r in masks.itertuples(index=False):
+        (out.setdefault(r.unit, {}).setdefault(r.granularity, {})
+            .setdefault(r.period, []).append([int(r.mask), int(r.count)]))
     return out
 
 
@@ -343,27 +293,64 @@ FILTER_JS = r"""
 (function(){
   const $ = id => document.getElementById(id);
   const min = CFG.smallCellMin;
-  const state = {unit: "__ALL__", gran: "all", period: "__all__", num: "strict", den: "elig"};
+  const state = {unit: "__ALL__", gran: "all", period: "__all__",
+                 tog: {exTrach:false, exParal:false, req12h:false, reqOxy:false, reqVaso:false,
+                       reqTrans:false, reqDur:false, reqPeep:false}};
   const unitSel = $("f-unit"), periodSel = $("f-period"), periodWrap = $("f-period-wrap");
   const plabel = p => (CFG.periodLabels && CFG.periodLabels[p]) || p;
 
-  // numerator (strict ⊆ any-duration ⊆ on-spontaneous) and denominator specs.
-  const NUM = {
-    strict: {elig:"sbt",         all:"sbt_all",    ptsElig:"pts_strict_elig", ptsAll:"pts_strict_all",
-             label:"SBT Delivered",        verb:"had an SBT delivered (≥2 min)", ever:"ever had a strict SBT"},
-    any:    {elig:"sbtany_elig", all:"sbtany_all", ptsElig:"pts_any_elig",    ptsAll:"pts_any_all",
-             label:"SBT (Any Duration)",   verb:"had an SBT of any duration",     ever:"ever had an SBT (any duration)"},
-    spont:  {elig:"spont_elig",  all:"spont_all",  ptsElig:"pts_spont_elig",  ptsAll:"pts_spont_all",
-             label:"On a Spontaneous Mode", verb:"were on a spontaneous mode",     ever:"were ever on a spontaneous mode"}
-  };
-  const DEN = {
-    elig: {key:"elig", pts:"pts_elig", label:"Eligible Vent-ICU Days", short:"of eligible vent-days"},
-    all:  {key:"vent", pts:"pts",      label:"All Vent-ICU Days",      short:"of all vent-ICU days"}
-  };
-  const numKey = () => NUM[state.num][state.den === "elig" ? "elig" : "all"];
-  const numVal = c => c[numKey()];
-  const denVal = c => c[DEN[state.den].key];
+  // ---- Exclusion-toggle engine (plan 04): num/den computed LIVE from the per-day
+  //      criterion-mask histogram (MASKS) given the active toggles (state.tog). ----
+  const BIT = {}; MASK_BITS.forEach((n, i) => BIT[n] = i);
+  const has = (m, name) => (m >> BIT[name]) & 1;
+  const T = () => state.tog;
+
+  function maskPassesDen(m){
+    const t = T();
+    if (t.exTrach && has(m, 'db_trach')) return false;
+    if (t.exParal && has(m, 'db_paralytic')) return false;
+    if (t.req12h && !has(m, 'db_accrued12')) return false;
+    if (t.reqOxy && t.reqVaso){ if (!has(m, 'db_stable_both')) return false; }
+    else if (t.reqOxy){ if (!has(m, 'db_stable_oxy')) return false; }
+    else if (t.reqVaso){ if (!has(m, 'db_stable_vaso')) return false; }
+    // "Require transition" also restricts the DENOMINATOR: a day already parked on a
+    // spontaneous mode with no controlled→support transition is not a transition candidate,
+    // so it leaves both numerator and denominator (it is not a missed SBT). (num ⊆ den safe:
+    // any numerator day has nb_t, so it is never dropped here.)
+    if (t.reqTrans && has(m, 'on_spontaneous') && !has(m, 'nb_t')) return false;
+    return true;
+  }
+  function numBitName(){
+    const t = T(), a = (t.reqTrans ? 't' : '') + (t.reqDur ? 'd' : '') + (t.reqPeep ? 'p' : '');
+    return {'':'on_spontaneous','t':'nb_t','d':'nb_d','p':'nb_p',
+            'td':'nb_td','tp':'nb_tp','dp':'nb_dp','tdp':'nb_tdp'}[a];
+  }
+  function maskArr(unit, gran, period){ return ((MASKS[unit]||{})[gran]||{})[period] || null; }
+  function aggFor(unit, gran, period){
+    const arr = maskArr(unit, gran, period);
+    if (!arr) return null;
+    const nb = numBitName(); let vent=0, den=0, num=0;
+    for (let i=0;i<arr.length;i++){ const m=arr[i][0], c=arr[i][1]; vent+=c;
+      if (maskPassesDen(m)){ den+=c; if (has(m, nb)) num+=c; } }
+    return {vent:vent, den:den, num:num};
+  }
+  const denVal = c => c ? c.den : 0;
+  const numVal = c => c ? c.num : 0;
   const fracOf = c => { const d = denVal(c); return d ? numVal(c)/d : null; };
+
+  function numLabel(){
+    const t = T(), p = [];
+    if (t.reqTrans) p.push("transition"); if (t.reqDur) p.push("≥2 min"); if (t.reqPeep) p.push("low-PEEP");
+    return p.length ? "SBT — " + p.join(" · ") : "On a spontaneous mode";
+  }
+  function denLabel(){
+    const t = T(), p = [];
+    if (t.exTrach) p.push("non-trach"); if (t.exParal) p.push("non-paralytic");
+    if (t.req12h) p.push("≥12h controlled");
+    if (t.reqOxy) p.push("stable O₂"); if (t.reqVaso) p.push("NEE≤0.2");
+    if (t.reqTrans) p.push("transition candidates");
+    return p.length ? "Vent-ICU days · " + p.join(", ") : "All vent-ICU days";
+  }
 
   const DC = 2 * Math.PI * 52;
   function drawDonut(frac, small){
@@ -378,7 +365,7 @@ FILTER_JS = r"""
 
   function periodsFor(unit, gran){
     if (gran === "all") return [];
-    return Object.keys((SLICES[unit] || {})[gran] || {}).sort();
+    return Object.keys((MASKS[unit] || {})[gran] || {}).sort();
   }
   function fillPeriods(){
     const ps = periodsFor(state.unit, state.gran);
@@ -390,51 +377,56 @@ FILTER_JS = r"""
     if (!ps.includes(state.period)) state.period = "__all__";
     periodSel.value = state.period;
   }
-  function cellFor(unit){
-    const u = SLICES[unit] || {};
-    if (state.gran === "all" || state.period === "__all__") return (u.all || {}).all || null;
-    return (u[state.gran] || {})[state.period] || null;
+  function resolveGP(){
+    const useAll = (state.gran === "all" || state.period === "__all__");
+    return {g: useAll ? "all" : state.gran, p: useAll ? "all" : state.period};
   }
+  function cellFor(unit){ const r = resolveGP(); return aggFor(unit, r.g, r.p); }
   const cell = () => cellFor(state.unit);
   function pct(x, dp){ return x == null ? "—" : (100*x).toFixed(dp == null ? 0 : dp) + "%"; }
 
   function render(){
+    syncToggleButtons();
     const c = cell();
-    const nspec = NUM[state.num], dspec = DEN[state.den];
-    $("donut-cap").textContent = nspec.label;
-    $("hd-lab").textContent = dspec.label;
+    $("donut-cap").textContent = numLabel();
+    $("hd-lab").textContent = denLabel();
     const ctx = CFG.unitLabels[state.unit] + " · " +
       (state.gran === "all" || state.period === "__all__" ? "all time" : plabel(state.period));
     if (!c || !denVal(c)){
       $("hd-elig").textContent = "—";
-      $("hd-sub").textContent = "no " + (state.den === "elig" ? "eligible" : "vent-ICU") + " days · " + ctx;
+      $("hd-sub").textContent = "no days · " + ctx;
       $("ptline").textContent = "";
       drawDonut(null, false);
-      $("smallnote").style.display = "none"; drawDecomp(null); drawTrend(); drawUnits(); drawDurations(); return;
+      $("smallnote").style.display = "none"; drawWaterfall(null); drawTrend(); drawUnits(); drawDurations(); return;
     }
     const small = denVal(c) < min;
     const frac = fracOf(c);
     $("hd-elig").textContent = denVal(c).toLocaleString();
-    $("hd-sub").textContent = numVal(c).toLocaleString() + " " + nspec.verb + " (" + pct(frac) + ") · " + ctx;
-    // patient-level secondary (numerator matched to the denominator mode)
-    const pn = c[state.den === "elig" ? nspec.ptsElig : nspec.ptsAll], pd = c[dspec.pts];
-    $("ptline").textContent = pd ? ("Patient-level: " + pn.toLocaleString() + " of " + pd.toLocaleString()
-      + " patients (" + pct(pd ? pn/pd : null) + ") " + nspec.ever + ".") : "";
+    $("hd-sub").textContent = numVal(c).toLocaleString() + " " + numLabel().toLowerCase()
+      + " (" + pct(frac) + ") · " + ctx;
+    $("ptline").textContent = "";
     drawDonut(frac, small);
     $("smallnote").style.display = small ? "block" : "none";
-    drawDecomp(c); drawTrend(); drawUnits(); drawDurations();
+    drawWaterfall(c); drawTrend(); drawUnits(); drawDurations();
+  }
+  function syncToggleButtons(){
+    document.querySelectorAll("#f-den button, #f-num button").forEach(b => {
+      b.classList.toggle("on", !!state.tog[b.dataset.tog]);
+    });
   }
 
   // ---- duration histogram + percentile table (per-trial; per-day for spontaneous) ----
   const DBUCK = [0, 5, 15, 30, 60, 120, 240, 480, Infinity];
   const DBLAB = ["<5m", "5–15m", "15–30m", "30–60m", "1–2h", "2–4h", "4–8h", ">8h"];
   function durSpec(){
-    if (state.num === "spont") return {ds: DUR.spont, minDur: 0, unit: "days",
+    const t = T();
+    // No transition required -> the broadest "on a spontaneous mode" view shows time-on-support
+    // per day. Once a transition is required, show per-trial transition-episode durations
+    // (these are arm-qualified/low-PEEP by construction); the >=2 min floor follows reqDur.
+    if (!t.reqTrans) return {ds: DUR.spont, minDur: 0, unit: "days",
       label: "Time on a Spontaneous Mode (per day)"};
-    if (state.num === "any") return {ds: DUR.episodes, minDur: 0, unit: "trials",
-      label: "SBT Duration — Any (per trial)"};
-    return {ds: DUR.episodes, minDur: 2, unit: "trials",
-      label: "SBT Duration — Strict ≥2 min (per trial)"};
+    return {ds: DUR.episodes, minDur: t.reqDur ? 2 : 0, unit: "trials",
+      label: "SBT Duration" + (t.reqDur ? " — ≥2 min" : "") + " (per qualifying trial)"};
   }
   function durValues(){
     const sp = durSpec(), ds = sp.ds;
@@ -498,50 +490,81 @@ FILTER_JS = r"""
     tbl.innerHTML = '<table class="dur-table">'+head+'</tr>'+body+'</tr></table>';
   }
 
-  // ---- "Why no SBT?" decomposition over ALL vent-ICU days (follows the numerator) ----
-  function drawDecomp(c){
-    const host = $("decomp"), note = $("decompNote");
-    if (!c || !c.vent){ host.innerHTML = ''; note.textContent = ''; return; }
-    const nspec = NUM[state.num];
-    const vent = c.vent, xall = c[nspec.all], xelig = c[nspec.elig];
-    const received = xall;
-    const missed = Math.max(0, c.elig - xelig);
-    const justified = Math.max(0, vent - received - missed);
-    const nonX = missed + justified;
-    const segs = [
-      {n: received,  c: "#8a1f2b", lab: "Received"},
-      {n: missed,    c: "#b5852a", lab: "Eligible · no trial (missed)"},
-      {n: justified, c: "#7d8a86", lab: "Not eligible (justified)"}
-    ];
-    const W = 720, H = 30, gap = 2; let x = 0, svg = "";
-    for (const s of segs){
-      const w = vent ? (s.n/vent)*W : 0;
-      if (w <= 0) { continue; }
-      svg += '<g><title>'+s.lab+': '+s.n.toLocaleString()+' ('+(100*s.n/vent).toFixed(1)+'% of vent-ICU days)</title>'
-           + '<rect x="'+x+'" y="0" width="'+Math.max(0,w-gap)+'" height="'+H+'" fill="'+s.c+'" rx="3"/></g>';
-      if (w > 46) svg += '<text x="'+(x+w/2-1)+'" y="'+(H/2+4)+'" font-size="11" text-anchor="middle" fill="#fff">'+(100*s.n/vent).toFixed(0)+'%</text>';
-      x += w;
+  // ---- Exclusion waterfall: all vent-ICU days peeled by each ACTIVE denominator toggle
+  //      (catalogue order) -> final denominator -> numerator (active trial-quality criteria) ----
+  function drawWaterfall(c){
+    const host = $("waterfall"), note = $("waterfallNote");
+    const r = resolveGP(), arr = maskArr(state.unit, r.g, r.p);
+    if (!arr){ host.innerHTML = ''; note.textContent = ''; return; }
+    const t = T();
+    const steps = [];
+    if (t.exTrach) steps.push({lab:"Exclude tracheostomy", pred:m=>!has(m,'db_trach')});
+    if (t.exParal) steps.push({lab:"Exclude continuous paralytic", pred:m=>!has(m,'db_paralytic')});
+    if (t.req12h)  steps.push({lab:"Require ≥12 h controlled vent", pred:m=>!!has(m,'db_accrued12')});
+    if (t.reqOxy || t.reqVaso){
+      const both = t.reqOxy && t.reqVaso;
+      const lab = both ? "Require stable window (O₂ & NEE≤0.2)"
+                : t.reqOxy ? "Require stable oxygenation (O₂)"
+                : "Require low vasopressors (NEE≤0.2)";
+      const bit = both ? 'db_stable_both' : t.reqOxy ? 'db_stable_oxy' : 'db_stable_vaso';
+      steps.push({lab:lab, pred:m=>!!has(m,bit)});
     }
-    host.innerHTML = '<svg viewBox="0 0 '+W+' '+H+'" width="'+W+'" height="'+H+'" style="max-width:100%">'+svg+'</svg>'
-      + '<div class="legend">'
-      + '<span><i style="background:#8a1f2b"></i>Received ('+received.toLocaleString()+')</span>'
-      + '<span><i style="background:#b5852a"></i>Eligible · no trial — missed ('+missed.toLocaleString()+')</span>'
-      + '<span><i style="background:#7d8a86"></i>Not eligible — justified ('+justified.toLocaleString()+')</span></div>';
-    const pj = nonX ? justified/nonX : null;
-    note.innerHTML = nonX
-      ? ('Of <b>' + nonX.toLocaleString() + '</b> vent-ICU days without ' + nspec.label.toLowerCase()
-         + ', <b>' + justified.toLocaleString() + ' (' + pct(pj) + ')</b> were <b>justified</b> by an '
-         + 'exclusion criterion (not eligible: &lt;12h controlled, no stable window, tracheostomy, or '
-         + 'continuous paralytic); '
-         + missed.toLocaleString() + ' (' + pct(nonX ? missed/nonX : null) + ') were eligible but had no trial '
-         + '(missed opportunity).')
-      : 'Every vent-ICU day in this slice received ' + nspec.label.toLowerCase() + '.';
+    if (t.reqTrans) steps.push({lab:"Drop parked-on-spontaneous (no transition)",
+                                pred:m=>!(has(m,'on_spontaneous') && !has(m,'nb_t'))});
+    let vent = 0; for (const e of arr) vent += e[1];
+    const rows = [{lab:"All vent-ICU days", n:vent, removed:0}];
+    const preds = []; let prev = vent;
+    for (const s of steps){
+      preds.push(s.pred);
+      let rem = 0; for (const e of arr){ if (preds.every(p=>p(e[0]))) rem += e[1]; }
+      rows.push({lab:s.lab, n:rem, removed:prev-rem}); prev = rem;
+    }
+    const den = prev, nb = numBitName();
+    let num = 0; for (const e of arr){ if (preds.every(p=>p(e[0])) && has(e[0],nb)) num += e[1]; }
+
+    // render: shrinking horizontal bars (funnel) + a final numerator split of the denominator
+    const W = 780, rowH = 34, padL = 312, barMax = W - padL - 78, top = 4;
+    const H = top + (rows.length + 1) * rowH + 6;
+    let svg = "";
+    rows.forEach((rw, i) => {
+      const y = top + i*rowH, w = vent ? Math.max(1, (rw.n/vent)*barMax) : 0;
+      const isStart = i === 0;
+      svg += '<text x="'+(padL-10)+'" y="'+(y+rowH/2+3)+'" font-size="11.5" text-anchor="end" fill="'
+           + (isStart?'#3a2c2c':'#6b5d57')+'"'+(isStart?' font-weight="700"':'')+'>'+rw.lab+'</text>';
+      svg += '<rect x="'+padL+'" y="'+(y+6)+'" width="'+w+'" height="'+(rowH-14)+'" fill="'
+           + (isStart?'#b9a59d':'#9a8c86')+'" rx="3"><title>'+rw.lab+': '+rw.n.toLocaleString()+'</title></rect>';
+      svg += '<text x="'+(padL+w+8)+'" y="'+(y+rowH/2+3)+'" font-size="11" fill="#6b5d57">'+rw.n.toLocaleString()
+           + (rw.removed>0 ? ' <tspan fill="#b06a4f">(−'+rw.removed.toLocaleString()+')</tspan>' : '')+'</text>';
+    });
+    // numerator row: filled num within the denominator width
+    const yN = top + rows.length*rowH;
+    const denW = vent ? Math.max(1,(den/vent)*barMax) : 0, numW = den ? (num/den)*denW : 0;
+    const rate = den ? num/den : null;
+    svg += '<text x="'+(padL-10)+'" y="'+(yN+rowH/2+3)+'" font-size="11.5" text-anchor="end" fill="#8a1f2b" font-weight="700">'
+         + numLabel()+'</text>';
+    svg += '<rect x="'+padL+'" y="'+(yN+6)+'" width="'+denW+'" height="'+(rowH-14)+'" fill="#efe4dc" rx="3"/>';
+    svg += '<rect x="'+padL+'" y="'+(yN+6)+'" width="'+numW+'" height="'+(rowH-14)+'" fill="#8a1f2b" rx="3">'
+         + '<title>'+numLabel()+': '+num.toLocaleString()+' / '+den.toLocaleString()+'</title></rect>';
+    svg += '<text x="'+(padL+denW+8)+'" y="'+(yN+rowH/2+3)+'" font-size="11" fill="#8a1f2b" font-weight="700">'
+         + num.toLocaleString()+' / '+den.toLocaleString()+'  ('+pct(rate)+')</text>';
+    host.innerHTML = '<svg viewBox="0 0 '+W+' '+H+'" width="'+W+'" height="'+H+'" style="max-width:100%">'+svg+'</svg>';
+
+    const off = !steps.length;
+    note.innerHTML = off
+      ? ('No candidate-day filters active — the denominator is <b>all '+vent.toLocaleString()
+         +'</b> vent-ICU days. Turn on filters above to peel the denominator down to a stricter cohort; '
+         +'each step shows the days it removes. The bottom bar is the numerator: <b>'+num.toLocaleString()
+         +' ('+pct(rate)+')</b> '+numLabel().toLowerCase()+'.')
+      : ('Each active filter removes the days shown in <span style="color:#b06a4f">(−n)</span>; the '
+         +'denominator shrinks from <b>'+vent.toLocaleString()+'</b> to <b>'+den.toLocaleString()+'</b>. '
+         +'Of those, <b>'+num.toLocaleString()+' ('+pct(rate)+')</b> met the active numerator criteria ('
+         + numLabel().toLowerCase()+').');
   }
 
   function drawUnits(){
     const host = $("units");
     const when = (state.gran === "all" || state.period === "__all__") ? "all time" : plabel(state.period);
-    $("unitsTitle").textContent = NUM[state.num].label + " Rate by ICU Unit · " + when;
+    $("unitsTitle").textContent = numLabel() + " rate (÷ " + denLabel().toLowerCase() + ") by ICU unit · " + when;
     const rows = [];
     for (const u of CFG.unitOrder){
       const c = cellFor(u); if (!c || !denVal(c)) continue;
@@ -569,16 +592,17 @@ FILTER_JS = r"""
 
   function drawTrend(){
     const tg = state.gran === "all" ? "month" : state.gran;
-    const series = (SLICES[state.unit] || {})[tg] || {};
+    const series = (MASKS[state.unit] || {})[tg] || {};
     const keys = Object.keys(series).sort();
     const Tg = tg.charAt(0).toUpperCase() + tg.slice(1);
-    $("trendTitle").textContent = NUM[state.num].label + " Rate by " + Tg + " · " + CFG.unitLabels[state.unit];
+    $("trendTitle").textContent = numLabel() + " rate by " + Tg + " · " + CFG.unitLabels[state.unit];
     const host = $("trend");
     if (!keys.length){ host.innerHTML = '<div class="muted">No periods in this slice.</div>'; return; }
+    const cellAt = k => aggFor(state.unit, tg, k);
     const slot = keys.length > 40 ? 15 : (keys.length > 15 ? 34 : 56);
     const pad = {l:36, r:12, t:14, b:48}, ih = 150;
     const W = pad.l + pad.r + keys.length*slot, H = pad.t + ih + pad.b;
-    let maxr = 0.05; for (const k of keys){ const d = series[k], dn = denVal(d); if (dn) maxr = Math.max(maxr, numVal(d)/dn); }
+    let maxr = 0.05; for (const k of keys){ const d = cellAt(k), dn = denVal(d); if (dn) maxr = Math.max(maxr, numVal(d)/dn); }
     const top = Math.max(0.1, Math.ceil(maxr*100/10)*10/100);
     const lblStep = Math.ceil(keys.length/24);
     let svg = '<line x1="'+pad.l+'" y1="'+pad.t+'" x2="'+pad.l+'" y2="'+(pad.t+ih)+'" stroke="#ece1d9"/>' +
@@ -586,7 +610,7 @@ FILTER_JS = r"""
               '<text x="'+(pad.l-6)+'" y="'+(pad.t+4)+'" font-size="9" text-anchor="end" fill="#9a8c86">'+(100*top).toFixed(0)+'%</text>' +
               '<text x="'+(pad.l-6)+'" y="'+(pad.t+ih)+'" font-size="9" text-anchor="end" fill="#9a8c86">0</text>';
     keys.forEach((k, i) => {
-      const d = series[k], dn = denVal(d), r = dn ? numVal(d)/dn : 0;
+      const d = cellAt(k), dn = denVal(d), r = dn ? numVal(d)/dn : 0;
       const x = pad.l + i*slot + slot*0.16, w = slot*0.68;
       const yT = pad.t + ih*(1 - r/top), hT = ih*(r/top);
       const dim = dn < min, sel = (k === state.period);
@@ -603,23 +627,76 @@ FILTER_JS = r"""
     host.innerHTML = '<svg viewBox="0 0 '+W+' '+H+'" height="'+H+'" width="'+W+'" style="max-width:none">'+svg+'</svg>';
   }
 
-  function segWire(groupId, key){
-    document.querySelectorAll("#" + groupId + " button").forEach(b => b.onclick = () => {
-      document.querySelectorAll("#" + groupId + " button").forEach(x => x.classList.remove("on"));
-      b.classList.add("on"); state[key] = b.dataset.v; render();
-    });
-  }
   unitSel.onchange = () => { state.unit = unitSel.value; fillPeriods(); render(); };
   periodSel.onchange = () => { state.period = periodSel.value; render(); };
   document.querySelectorAll("#f-gran button").forEach(b => b.onclick = () => {
     document.querySelectorAll("#f-gran button").forEach(x => x.classList.remove("on"));
     b.classList.add("on"); state.gran = b.dataset.g; state.period = "__all__"; fillPeriods(); render();
   });
-  segWire("f-num", "num");
-  segWire("f-den", "den");
+  // exclusion toggles: each button flips state.tog[key] (on/off); engine recomputes live.
+  document.querySelectorAll("#f-den button, #f-num button").forEach(b => b.onclick = () => {
+    const k = b.dataset.tog; state.tog[k] = !state.tog[k]; render();
+  });
+  const rb = $("f-reset"); if (rb) rb.onclick = () => {
+    Object.keys(state.tog).forEach(k => state.tog[k] = false); render();
+  };
   fillPeriods(); render();
 })();
 """
+
+
+# Exclusion-toggle catalogue (plan 04). Each: (key, label, definition, effect). Keys map
+# to state.tog in the JS engine; the same list drives the toggle buttons + the on-screen
+# catalogue panel so what each toggle removes (num/den/both) is always documented.
+EXCLUSION_CATALOGUE = {
+    "den": [
+        ("exTrach", "Exclude tracheostomy",
+         "Remove vent-days on which the patient was tracheostomized (a different liberation path — trach-collar, not a vent SBT).", "den + num"),
+        ("exParal", "Exclude continuous paralytic",
+         "Remove vent-days with a continuous neuromuscular-blocker infusion (no respiratory drive → not a candidate).", "den + num"),
+        ("req12h", "Require ≥12h controlled",
+         "Keep only days with ≥12 h of controlled ventilation accrued before the day (SBT meaningful only after sustained controlled vent).", "den + num"),
+        ("reqOxy", "Require stable oxygenation",
+         "Keep only days with a ≥2 h window of FiO₂ ≤ 0.50, PEEP ≤ 8, SpO₂ ≥ 88% (safe to attempt weaning).", "den + num"),
+        ("reqVaso", "Require low vasopressors (NEE≤0.2)",
+         "Keep only days with a ≥2 h window of norepinephrine-equivalent ≤ 0.2 mcg/kg/min — low-dose pressors are allowed, only days above 0.2 are excluded (hemodynamic stability; not universally applied).", "den + num"),
+        ("reqTrans", "Require controlled→support transition",
+         "Changes the question to transitions specifically: count the day only if a controlled→support "
+         "transition occurred, AND drop days already parked on a spontaneous mode with no transition from the "
+         "denominator too (they are not transition candidates, not missed SBTs).", "den + num"),
+    ],
+    "num": [
+        ("reqDur", "Require sustained ≥2 min",
+         "Count the day only if a support episode lasted ≥ 2 minutes (not a momentary blip).", "num"),
+        ("reqPeep", "Require low PEEP on support",
+         "Count the day only if a support episode met PEEP ≤ 8 (pressure-support) / ≤ 5 (CPAP) — a genuine weaning trial.", "num"),
+    ],
+}
+
+
+def build_catalogue_panel() -> str:
+    """Static on-screen table documenting every toggle and what it removes (num/den/both)."""
+    def rows(items, cls):
+        out = ""
+        for k, lab, defn, eff in items:
+            out += (f'<tr><td class="catlab">{html.escape(lab)}</td>'
+                    f'<td>{html.escape(defn)}</td>'
+                    f'<td class="cateff {cls}">{html.escape(eff)}</td></tr>')
+        return out
+    return (
+        '<div class="section catalogue"><h2>What each toggle does</h2>'
+        '<div class="fig-caption">One rate. With every toggle <b>off</b> it is the broadest SBT lens — '
+        '<b>any spontaneous-mode presence</b> ÷ <b>all vent-ICU days</b>. Each toggle below applies one '
+        'exclusion, stating whether it removes days from the <b>denominator</b> (candidate days; carries the '
+        'numerator with them), or only disqualifies the <b>numerator</b> attempt. All eight on = the '
+        'by-the-book strict SBT rate.</div>'
+        '<table class="cattable"><thead><tr><th>Toggle</th><th>Effect on a vent-ICU day</th>'
+        '<th>Removes from</th></tr></thead><tbody>'
+        '<tr class="catsub"><td colspan="3">Candidate-day filters — denominator</td></tr>'
+        + rows(EXCLUSION_CATALOGUE["den"], "eff-den")
+        + '<tr class="catsub"><td colspan="3">Trial-quality filters — numerator</td></tr>'
+        + rows(EXCLUSION_CATALOGUE["num"], "eff-num")
+        + '</tbody></table></div>')
 
 
 def build_controls(slices: pd.DataFrame) -> str:
@@ -634,15 +711,24 @@ def build_controls(slices: pd.DataFrame) -> str:
             v=v, on=' class="on"' if v == default else "", lab=html.escape(lab)) for v, lab in items)
         return f'<div class="seg" id="{group_id}">{btns}</div>'
 
-    num_seg = seg("f-num", [("strict", "Strict SBT"), ("any", "Any duration"),
-                            ("spont", "On spontaneous")], "strict")
-    den_seg = seg("f-den", [("elig", "Eligible days"), ("all", "All vent-days")], "elig")
+    def togs(items):
+        return "".join('<button data-tog="{k}" title="{tt}">{lab}</button>'.format(
+            k=k, lab=html.escape(lab), tt=html.escape(tt)) for k, lab, tt, _ in items)
+    den_t = togs(EXCLUSION_CATALOGUE["den"])
+    num_t = togs(EXCLUSION_CATALOGUE["num"])
     return ('<div class="controls">'
             f'<label class="ctl">Unit<select id="f-unit">{opts}</select></label>'
             f'<div class="ctl">Time<div class="seg" id="f-gran">{gran_btns}</div></div>'
             '<label class="ctl" id="f-period-wrap" style="display:none">Period<select id="f-period"></select></label>'
-            f'<div class="ctl">Numerator{num_seg}</div>'
-            f'<div class="ctl">Denominator{den_seg}</div>'
+            '</div>'
+            '<div class="controls toggles">'
+            f'<div class="ctl tgroup"><span class="tglab">Candidate-day filters '
+            '<em>(denominator)</em></span>'
+            f'<div class="seg toggleseg" id="f-den">{den_t}</div></div>'
+            f'<div class="ctl tgroup"><span class="tglab">Trial-quality filters '
+            '<em>(numerator)</em></span>'
+            f'<div class="seg toggleseg" id="f-num">{num_t}</div></div>'
+            '<button class="resetbtn" id="f-reset" title="Turn all toggles off (broadest view)">Reset</button>'
             '</div>')
 
 
@@ -687,6 +773,7 @@ margin:24px 0 34px;box-shadow:0 3px 10px rgba(120,30,40,.05);}}
 .decompNote{{font-size:13.5px;color:var(--ink);margin-top:12px;line-height:1.65;
 background:var(--cream);border:1px solid var(--line);border-radius:10px;padding:12px 16px;}}
 .decompNote b{{color:var(--maroon-d);}}
+.decompWhyHd{{font-size:15px;font-weight:600;color:var(--maroon-d);margin:26px 0 4px;}}
 .dur-wrap{{display:flex;flex-wrap:wrap;align-items:flex-start;gap:24px;}}
 .dur-table{{border-collapse:collapse;margin:8px 0 2px;font-size:13px;}}
 .dur-table th{{background:var(--cream);color:var(--maroon-d);font-weight:700;padding:7px 15px;
@@ -705,6 +792,28 @@ color:var(--ink);padding:7px 13px;cursor:pointer;border-left:1px solid var(--lin
 text-transform:none;letter-spacing:0;}}
 .seg button:first-child{{border-left:0;}}
 .seg button.on{{background:var(--maroon);color:#fff;}}
+.controls.toggles{{align-items:flex-start;gap:24px;margin:4px 0 8px;padding:14px 0 4px;
+border-top:1px dashed var(--line);}}
+.tgroup{{gap:7px;}}
+.tglab{{font-size:11px;font-weight:800;color:var(--maroon-d);}}
+.tglab em{{font-weight:600;font-style:normal;color:var(--muted);text-transform:none;}}
+.toggleseg{{flex-wrap:wrap;border:0;gap:7px;}}
+.toggleseg button{{border:1px solid var(--line);border-radius:8px;background:var(--card);
+color:var(--ink);padding:7px 11px;font-size:12.5px;}}
+.toggleseg button.on{{background:var(--maroon);color:#fff;border-color:var(--maroon);}}
+.resetbtn{{align-self:flex-end;font:inherit;font-size:12px;font-weight:700;color:var(--muted);
+background:var(--card);border:1px solid var(--line);border-radius:8px;padding:7px 12px;cursor:pointer;}}
+.resetbtn:hover{{color:var(--maroon-d);border-color:var(--maroon);}}
+.cattable{{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:6px;}}
+.cattable th{{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;
+color:var(--muted);border-bottom:1px solid var(--line);padding:6px 10px;}}
+.cattable td{{padding:7px 10px;border-bottom:1px solid #f0e7e1;vertical-align:top;}}
+.cattable .catsub td{{background:var(--cream);font-weight:800;color:var(--maroon-d);
+font-size:11px;text-transform:uppercase;letter-spacing:.04em;}}
+.cattable .catlab{{font-weight:700;color:var(--ink);white-space:nowrap;}}
+.cateff{{font-weight:700;white-space:nowrap;font-size:11.5px;}}
+.cateff.eff-den{{color:#2f6f7d;}} .cateff.eff-num{{color:#8a1f2b;}}
+#waterfall{{overflow-x:auto;margin-top:4px;}}
 .smallnote{{display:none;font-size:11.5px;color:var(--warn);margin:-22px 0 26px;}}
 .trend-wrap{{overflow-x:auto;padding-bottom:4px;}}
 .muted{{color:var(--muted);font-size:13px;}}
@@ -732,7 +841,7 @@ border-top:1px solid var(--line);padding-top:14px;}}
   <header class="top">{brand}
     <div><a class="backlink" href="scorecard.html">← CLIF ICU Ventilator QI Bundle</a>
     <h1>Spontaneous Breathing Trial — Quality-of-Care</h1>
-    <div class="sub">Daily controlled→support breathing-trial delivery (Jain et al.) · {html.escape(ctx['site'])} ·
+    <div class="sub">Daily controlled→support breathing-trial delivery · {html.escape(ctx['site'])} ·
     generated {html.escape(ctx['generated'])}</div></div>
   </header>
 
@@ -747,24 +856,25 @@ border-top:1px solid var(--line);padding-top:14px;}}
     <text id="donut-pct" x="60" y="60" text-anchor="middle" dominant-baseline="central"
     font-size="30" font-weight="800" fill="var(--maroon)"
     font-family="Inter,system-ui,sans-serif">{ctx['frac0_pct']}</text>
-    </svg><div class="donut-cap" id="donut-cap">SBT Delivered</div></div>
+    </svg><div class="donut-cap" id="donut-cap">On a spontaneous mode</div></div>
     <div class="hd-text">
     <div class="hd-big" id="hd-elig">{ctx['n_elig']:,}</div>
-    <div class="hd-lab" id="hd-lab">Eligible Vent-ICU Days</div>
+    <div class="hd-lab" id="hd-lab">All vent-ICU days</div>
     <div class="hd-sub" id="hd-sub">{ctx['hd_sub0']}</div>
     <div class="hd-pt" id="ptline"></div>
     </div></div>
   {ctx['smallnote']}
 
-  <div class="section"><h2>Where the Vent-ICU Days Go</h2>
-    <div class="fig-caption">Every ventilated-ICU patient-day in the selected slice, split by the
-    <b>Numerator</b> chosen above: days that <b>received</b> the trial, days that were <b>eligible but had
-    no trial</b> (missed opportunity), and days that were <b>not eligible</b> — a documented reason the day
-    could not/should not have a trial (justified: e.g. tracheostomy, continuous paralytic, &lt;12h
-    controlled, or no stable window). Reacts to Unit/Time/Period and the Numerator toggle;
-    independent of the Denominator toggle.</div>
-    <div id="decomp" class="decomp"></div>
-    <div class="decompNote" id="decompNote"></div>
+  {ctx['catalogue']}
+
+  <div class="section"><h2>Exclusion Waterfall — Where the Vent-ICU Days Go</h2>
+    <div class="fig-caption">All vent-ICU days in the selected slice, peeled by each <b>active candidate-day
+    filter</b> (top → bottom, in catalogue order) down to the final <b>denominator</b>; the bottom maroon
+    bar is the <b>numerator</b> (days meeting the active trial-quality filters) within it — its fill is the
+    headline rate. With no toggles active the denominator is all vent-ICU days. Reacts to every toggle and
+    to Unit/Time/Period.</div>
+    <div id="waterfall"></div>
+    <div class="decompNote" id="waterfallNote"></div>
   </div>
 
   {ctx['caveat']}
@@ -772,10 +882,9 @@ border-top:1px solid var(--line);padding-top:14px;}}
   <div class="section"><h2>Rate Over Time</h2>
     <div class="fig-caption" id="trendTitle"></div>
     <div class="trend-wrap">{ctx['trend']}</div>
-    <div class="fig-caption">Each bar = the selected <b>numerator ÷ denominator</b> rate for one period in
-    the selected unit. Bars are grayed when the period has fewer than the small-cell threshold of
-    denominator days. Use the controls to switch unit/granularity/numerator/denominator; pick a Period to
-    drill the headline to one bucket.</div>
+    <div class="fig-caption">Each bar = the live rate (under the active toggles) for one period in the
+    selected unit. Bars are grayed when the period has fewer than the small-cell threshold of denominator
+    days. Toggles and unit/granularity all update this; pick a Period to drill the headline to one bucket.</div>
   </div>
 
   <div class="section"><h2>Rate by ICU Unit</h2>
@@ -790,19 +899,12 @@ border-top:1px solid var(--line);padding-top:14px;}}
   <div class="section"><h2>How Long Are the Trials?</h2>
     <div class="fig-caption" id="durTitle"></div>
     <div class="dur-wrap"><div class="trend-wrap" id="durHist"></div><div id="durTable"></div></div>
-    <div class="fig-caption">Distribution of <b>SBT durations</b> (per trial — the length of each
-    controlled→support episode) for the Strict / Any-duration numerators, or <b>time on a spontaneous
-    mode per day</b> for the On-spontaneous numerator. Reacts to Unit / Time / Period and the
-    <b>Numerator</b> toggle (independent of the Denominator). The gray <b>&gt;8 h</b> bin is largely
+    <div class="fig-caption">When <b>require transition</b> is on: distribution of <b>SBT durations</b>
+    (per qualifying controlled→support trial), with the ≥2 min floor following that toggle. When it is off
+    (broadest): <b>time on a spontaneous mode per day</b>. Reacts to Unit / Time / Period and the numerator
+    toggles. The gray <b>&gt;8 h</b> bin is largely
     sustained support ventilation rather than a discrete trial — a true SBT ends in extubation or a return
     to a controlled mode. Where charting is hourly a brief trial may be missed entirely (a lower bound).</div>
-  </div>
-
-  <div class="section"><h2>Cohort Flow</h2>
-    <div class="fig"><img src="{ctx['consort_uri']}" alt="cohort funnel"></div>
-    <div class="fig-caption">From ventilated-ICU patient-days to non-tracheostomized days, eligible
-    SBT-opportunity days (≥12h controlled + ≥2h stable window), and days with a controlled→support
-    transition. The SBT-delivered percentage is of the eligible denominator.</div>
   </div>
 
   <div class="section"><h2>Table 1 — Eligible Patients, Ever-SBT vs Never (n = {ctx['table_n']:,})
@@ -834,6 +936,8 @@ def main() -> None:
     summary = pd.read_csv(final / "metrics_site_summary.csv")
     obs = pd.read_parquet(inter / "metrics_patient_day_level.parquet")
     slices = pd.read_parquet(inter / "metrics_slices.parquet")
+    masks = pd.read_parquet(inter / "metrics_masks.parquet")
+    mask_bits = _json.loads((inter / "metrics_masks_bits.json").read_text())
     durs = (pd.read_parquet(inter / "sbt_durations.parquet")
             if (inter / "sbt_durations.parquet").exists()
             else pd.DataFrame(columns=["unit", "icu_day", "dur_min", "arm"]))
@@ -854,7 +958,6 @@ def main() -> None:
     generated = str(s("vent_icu_days")["generated"])
     small_cell_min = int(cfg.get("reporting", {}).get("small_cell_min_den", 10))
 
-    slices_js = build_slices_js(slices)
     present_units = set(slices["unit"].unique())
     unit_order = [u for u in UNIT_LABELS if u in present_units and u != "unknown"]
     period_labels = {p: _period_label(p) for p in
@@ -863,8 +966,10 @@ def main() -> None:
               "unitLabels": {u: UNIT_LABELS.get(u, u) for u in slices["unit"].unique()},
               "unitOrder": unit_order,
               "periodLabels": period_labels}
+    masks_js = build_masks_js(masks)
     dur_payload, dur_cfg = build_duration_payload(durs, obs)
-    script_html = ("<script>\nconst SLICES = " + _json.dumps(slices_js, ensure_ascii=False)
+    script_html = ("<script>\nconst MASKS = " + _json.dumps(masks_js, ensure_ascii=False)
+                   + ";\nconst MASK_BITS = " + _json.dumps(mask_bits, ensure_ascii=False)
                    + ";\nconst CFG = " + _json.dumps(cfg_js, ensure_ascii=False)
                    + ";\nconst DUR = " + _json.dumps(dur_payload, ensure_ascii=False)
                    + ";\nconst DURCFG = " + _json.dumps(dur_cfg, ensure_ascii=False)
@@ -872,7 +977,13 @@ def main() -> None:
 
     import math
     _C = 2 * math.pi * 52
-    _frac0 = n_sbt / max(n_elig, 1)
+    # Initial donut = the BROADEST default (all toggles off): on_spontaneous / all vent-days.
+    n_spont_all = int(obs["on_spontaneous"].sum())
+    _frac0 = n_spont_all / max(n_vent, 1)
+    # All-toggles-ON endpoint: numerator = strict SBT (n_sbt); denominator = eligible days that
+    # are transition candidates (drop eligible days parked on a spontaneous mode with no transition,
+    # per the "require transition" den+num rule). Differs from the legacy all-eligible rate (n_sbt/n_elig).
+    _allon_den = int((obs["eligible"] & ~(obs["on_spontaneous"] & ~obs["nb_t"])).sum())
 
     native = diag.get("pct_native_support_rows")
     native_li = (
@@ -881,40 +992,37 @@ def main() -> None:
         'where ventilator settings are charted only hourly a brief trial can be missed')
     pts_pct = 100 * pts_sbt / max(pts_elig, 1)
     caveat = (
-        '<div class="amber"><b>Definitions &amp; data quality</b> (per Jain et al.).'
+        '<div class="amber"><b>Definitions &amp; data quality.</b> One rate, broadest by default; each toggle '
+        'above applies one exclusion (see <em>What each toggle does</em>). Endpoints on this cohort: all '
+        f'toggles <b>off</b> = {n_spont_all:,} / {n_vent:,} = {100*_frac0:.1f}% (any spontaneous-mode '
+        f'presence ÷ all vent-ICU days); all <b>on</b> = strict SBT among transition candidates, {n_sbt:,} / '
+        f'{_allon_den:,} = {100*n_sbt/max(_allon_den,1):.1f}%. (The numerator is the strict-SBT transition; '
+        f'the scorecard tile reports this same {n_sbt:,} numerator over transition-candidate days. The legacy '
+        f'all-eligible rate {n_sbt:,} / {n_elig:,} = {100*n_sbt/max(n_elig,1):.1f}% keeps parked-on-spontaneous '
+        f'days in the denominator.)'
         '<ul>'
-        '<li><b>Eligible day:</b> ≥12 h of controlled ventilation accrued <em>and</em> a ≥2 h window with '
-        'FiO2 ≤ 0.50, PEEP ≤ 8, SpO2 ≥ 88%, and norepinephrine-equivalent ≤ 0.2 mcg/kg/min, and not '
-        'tracheostomized or on a continuous paralytic that day.</li>'
-        '<li><b>Numerators</b> (set by the Numerator toggle): '
-        '<b>Strict SBT</b> — a controlled→support transition (pressure-support/CPAP; PEEP ≤ 8, or CPAP ≤ 5) '
-        'lasting ≥ 2 min; this is the Jain headline. '
-        '<b>SBT, any duration</b> — the same transition, of any length. '
-        '<b>On a spontaneous mode</b> — any time on a spontaneous mode that day, no transition required '
-        '(a patient parked on support counts).</li>'
-        f'<li><b>Tracheostomized days</b> ({n_vent-n_nontrach:,} of {n_vent:,}) are excluded from the '
-        'eligible denominator and the strict SBT funnel. Under the <em>All vent-ICU days</em> denominator '
-        'they remain in the total and appear as a “not eligible” reason.</li>'
-        f'<li><b>Continuous paralytic (NMBA) days</b> ({n_paralytic:,}) are excluded from the eligible '
-        'denominator — a paralyzed patient has no respiratory drive and is not an SBT candidate, so these '
-        'count as justified, not as missed opportunities. Bolus paralytics (intermittent) are not captured.</li>'
-        f'<li><b>Lower bound:</b> {native_li} — a brief trial charted only hourly can be missed, so the '
-        'transition-based rates (Strict / Any duration) are a lower bound. CPAP pressure is read from PEEP '
-        '(CLIF has no dedicated CPAP column).</li>'
-        f'<li><b>Other:</b> stability could not be assessed on {n_notassess:,} days (excluded from the '
-        'eligible denominator); norepinephrine-equivalents use standard published conversion factors '
-        '(config-driven).</li>'
-        '</ul>'
-        f'<b>Patient-level:</b> {pts_sbt:,} of {pts_elig:,} eligible patients ({pts_pct:.0f}%) ever had a '
-        'strict SBT.</div>'
+        '<li><b>Candidate-day filters (denominator):</b> tracheostomy, continuous paralytic, ≥12 h controlled '
+        'accrued, ≥2 h stable oxygenation (FiO₂≤0.50/PEEP≤8/SpO₂≥88), ≥2 h low vasopressors (NEE≤0.2; '
+        'low-dose allowed, only days above 0.2 excluded). '
+        'Removing a day removes its attempt from the numerator too (a numerator day is always a denominator '
+        'day). Vasopressor is a separate toggle from oxygenation because it is not shared across institutions.</li>'
+        '<li><b>Trial-quality filters (numerator):</b> require a controlled→support transition, require it '
+        'sustained ≥ 2 min, require low PEEP on support (≤8 PS / ≤5 CPAP). The latter two only change whether '
+        'an attempt counts; <b>require transition also trims the denominator</b> — a day already parked on a '
+        'spontaneous mode with no transition is not a transition candidate, so it leaves both sides (it is not '
+        'a missed SBT).</li>'
+        f'<li><b>Lower bound:</b> {native_li} — a brief trial charted only hourly can be missed, so any rate '
+        'with “require transition” active is a lower bound. CPAP pressure is read from PEEP (CLIF has no '
+        'dedicated CPAP column).</li>'
+        f'<li><b>Stability assessability:</b> when a stability toggle is on, a day with no qualifying ≥2 h '
+        'window (including ~{n_notassess:,} days where the signals were too sparse to assess) is excluded. '
+        'Norepinephrine-equivalents use standard published conversion factors (config-driven).</li>'
+        '</ul></div>'
     )
     smallnote = (f'<div class="smallnote" id="smallnote">† Rate grayed: this slice has fewer than '
                  f'{small_cell_min} eligible days — interpret with caution.</div>')
 
     logo_uri = _load_logo()
-    consort_uri = make_consort(
-        {"vent": n_vent, "nontrach": n_nontrach, "eligible": n_elig, "sbt": n_sbt}, final / "graphs")
-
     pt = build_patient_table(obs)
     table1 = build_table1(pt) if not pt.empty else pd.DataFrame()
     table1_html = render_gtsummary_table_html(table1)
@@ -922,12 +1030,13 @@ def main() -> None:
     ctx = {
         "logo_uri": logo_uri, "site": site, "generated": generated,
         "controls": build_controls(slices), "smallnote": smallnote, "caveat": caveat,
-        "trend": '<div id="trend"></div>', "consort_uri": consort_uri,
+        "catalogue": build_catalogue_panel(),
+        "trend": '<div id="trend"></div>',
         "table1": table1_html, "table_n": len(pt), "script": script_html,
-        "n_elig": n_elig,
+        "n_elig": n_vent,
         "frac0_dash": f"{_frac0*_C:.1f} {_C:.1f}",
         "frac0_pct": f"{100*_frac0:.0f}%",
-        "hd_sub0": f"{n_sbt:,} had an SBT delivered ({100*_frac0:.0f}%) · All ICUs · all time",
+        "hd_sub0": f"{n_spont_all:,} on a spontaneous mode ({100*_frac0:.0f}%) · All ICUs · all time",
     }
     out_path = final / "sbt_dashboard.html"
     out_path.write_text(build_html(ctx), encoding="utf-8")

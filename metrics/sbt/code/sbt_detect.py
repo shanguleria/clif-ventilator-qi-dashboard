@@ -139,8 +139,15 @@ def hourly_stability_window(wf: pd.DataFrame, days: pd.DataFrame,
     backward. Assessability is tracked separately so all-missing days become
     `not_assessable` rather than silently not-eligible.
 
-    Returns [encounter_block, icu_day, stable_window, n_stable_hours,
-             n_scaffold_hours, n_assessable_hours].
+    Returns [encounter_block, icu_day, stable_window, stable_window_no_ne,
+             stable_window_ne_only, n_stable_hours, n_scaffold_hours, n_assessable_hours].
+
+    Three nested-criteria window booleans support the independent stability toggles:
+      stable_window         — all four criteria (FiO2/PEEP/SpO2 & NEE)        [stable_both]
+      stable_window_no_ne   — oxygenation only (FiO2/PEEP/SpO2, NEE dropped)  [stable_oxy]
+      stable_window_ne_only — vasopressor only (NEE<=max, oxygenation dropped)[stable_vaso]
+    A site that screens on oxygenation only uses stable_oxy; on pressors only, stable_vaso;
+    on both (Jain), stable_both. Each is "exists a >=2h contiguous qualifying window."
     """
     elig = cfg["sbt_eligibility"]
     fio2_max = float(elig["fio2_max"]); peep_max = float(elig["peep_max"])
@@ -155,7 +162,8 @@ def hourly_stability_window(wf: pd.DataFrame, days: pd.DataFrame,
         return s.dt.tz_convert(tz) if getattr(s.dt, "tz", None) is not None \
             else s.dt.tz_localize(tz, ambiguous="NaT", nonexistent="shift_forward")
 
-    cols = ["encounter_block", "icu_day", "stable_window",
+    cols = ["encounter_block", "icu_day", "stable_window", "stable_window_no_ne",
+            "stable_window_ne_only",
             "n_stable_hours", "n_scaffold_hours", "n_assessable_hours"]
 
     # Scaffold hours carrying FiO2/PEEP (already hourly + ffilled in the waterfall).
@@ -219,6 +227,13 @@ def hourly_stability_window(wf: pd.DataFrame, days: pd.DataFrame,
         (sh["fio2_set"] <= fio2_max) & (sh["peep_set"] <= peep_max) &
         (sh["spo2"] >= spo2_min) & (sh["ne_equiv"] <= ne_max)
     ).fillna(False)
+    # Counterfactual: stability WITHOUT the vasopressor criterion (FiO2/PEEP/SpO2 only).
+    sh["stable_h_no_ne"] = (
+        (sh["fio2_set"] <= fio2_max) & (sh["peep_set"] <= peep_max) &
+        (sh["spo2"] >= spo2_min)
+    ).fillna(False)
+    # Counterfactual: vasopressor criterion ALONE (NEE<=max), ignoring oxygenation/PEEP.
+    sh["stable_h_ne_only"] = (sh["ne_equiv"] <= ne_max).fillna(False)
     sh["assessable_h"] = (
         sh["fio2_set"].notna() & sh["peep_set"].notna() &
         sh["spo2"].notna() & sh["ne_assessable"]
@@ -234,13 +249,29 @@ def hourly_stability_window(wf: pd.DataFrame, days: pd.DataFrame,
     run_size = sh.groupby("run_id")["t"].transform("size")
     sh["in_qual_run"] = sh["stable_h"] & (run_size >= min_hours)
 
+    # Same run-length on the NE-relaxed stable boolean (its own run boundaries).
+    brk_ne = key_change | sh["stable_h_no_ne"].ne(sh["stable_h_no_ne"].shift()) | gap.fillna(True)
+    sh["run_id_ne"] = brk_ne.cumsum()
+    run_size_ne = sh.groupby("run_id_ne")["t"].transform("size")
+    sh["in_qual_run_ne"] = sh["stable_h_no_ne"] & (run_size_ne >= min_hours)
+
+    # Same run-length on the vasopressor-only stable boolean.
+    brk_neo = key_change | sh["stable_h_ne_only"].ne(sh["stable_h_ne_only"].shift()) | gap.fillna(True)
+    sh["run_id_neo"] = brk_neo.cumsum()
+    run_size_neo = sh.groupby("run_id_neo")["t"].transform("size")
+    sh["in_qual_run_neo"] = sh["stable_h_ne_only"] & (run_size_neo >= min_hours)
+
     agg = (sh.groupby(["encounter_block", "icu_day"], observed=True)
              .agg(stable_window=("in_qual_run", "any"),
+                  stable_window_no_ne=("in_qual_run_ne", "any"),
+                  stable_window_ne_only=("in_qual_run_neo", "any"),
                   n_stable_hours=("stable_h", "sum"),
                   n_scaffold_hours=("t", "size"),
                   n_assessable_hours=("assessable_h", "sum"))
              .reset_index())
     agg["stable_window"] = agg["stable_window"].astype(bool)
+    agg["stable_window_no_ne"] = agg["stable_window_no_ne"].astype(bool)
+    agg["stable_window_ne_only"] = agg["stable_window_ne_only"].astype(bool)
     for c in ("n_stable_hours", "n_scaffold_hours", "n_assessable_hours"):
         agg[c] = agg[c].astype(int)
     return agg[cols]
@@ -326,6 +357,59 @@ def support_transitions(wf: pd.DataFrame, cfg: dict, imv_category: str = "imv") 
     trans["dur_min"] = (trans["ep_end"] - trans["ep_start"]).dt.total_seconds() / 60.0
     trans["arm"] = trans["cls"].str.replace("sbt_", "", regex=False)
     return trans[cols].reset_index(drop=True)
+
+
+def support_episodes(wf: pd.DataFrame, cfg: dict, imv_category: str = "imv") -> pd.DataFrame:
+    """ALL native support-mode episodes (the exclusion-toggle 'attempt episodes').
+
+    Generalizes `support_transitions`: returns one row per maximal native run on ANY
+    support mode (qualifying low-PEEP `sbt_ps`/`sbt_cpap` OR PEEP-failing `support_other`),
+    each tagged with the two trial-quality attributes the numerator toggles act on:
+      is_transition — the immediately preceding episode in the block is 'controlled'
+                      (a deliberate controlled->support edge, not parked-on-support)
+      peep_ok       — the support meets the arm PEEP gate (PEEP<=ps_peep_max for PS /
+                      <=cpap_peep_max for CPAP); i.e. class is sbt_ps/sbt_cpap not support_other
+    `dur_min` is the episode length. Numerator subsets are derived per day in stage 03 as
+    "exists an episode meeting all active criteria together". The legacy strict numerator =
+    episodes with (is_transition & peep_ok & dur_min>=floor); any-duration = (is_transition &
+    peep_ok); on_spontaneous (the broadest) uses native+scaffold presence (support_presence_days),
+    NOT this native-only set. Native resolution -> transition-based subsets are a lower bound.
+    Returns [encounter_block, ep_start, ep_end, dur_min, is_transition, peep_ok, arm].
+    """
+    cols = ["encounter_block", "ep_start", "ep_end", "dur_min", "is_transition", "peep_ok", "arm"]
+
+    nat = wf[~wf["is_scaffold"].fillna(False)].copy()
+    nat["encounter_block"] = nat["encounter_block"].astype(str)
+    nat = nat.dropna(subset=["encounter_block", "recorded_dttm"])
+    nat = nat[nat["encounter_block"] != "nan"]
+    if nat.empty:
+        return pd.DataFrame(columns=cols)
+    nat = nat.sort_values(["encounter_block", "recorded_dttm"]).reset_index(drop=True)
+    nat["cls"] = _row_mode_class(nat, cfg, imv_category)
+    nat["seg_end"] = nat.groupby("encounter_block")["recorded_dttm"].shift(-1)
+    nat["seg_end"] = nat["seg_end"].fillna(nat["recorded_dttm"] + TRAILING_NATIVE_CAP)
+
+    blk_change = nat["encounter_block"] != nat["encounter_block"].shift()
+    cls_change = nat["cls"] != nat["cls"].shift()
+    nat["ep_id"] = (blk_change | cls_change).cumsum()
+    ep = (nat.groupby("ep_id", observed=True)
+            .agg(encounter_block=("encounter_block", "first"),
+                 cls=("cls", "first"),
+                 ep_start=("recorded_dttm", "min"),
+                 ep_end=("seg_end", "max"))
+            .reset_index(drop=True))
+    ep = ep.sort_values(["encounter_block", "ep_start"]).reset_index(drop=True)
+    ep["prev_cls"] = ep.groupby("encounter_block")["cls"].shift()
+
+    is_supp = ep["cls"].isin(["sbt_ps", "sbt_cpap", "support_other"])
+    sup = ep[is_supp].copy()
+    if sup.empty:
+        return pd.DataFrame(columns=cols)
+    sup["dur_min"] = (sup["ep_end"] - sup["ep_start"]).dt.total_seconds() / 60.0
+    sup["is_transition"] = (sup["prev_cls"] == "controlled")
+    sup["peep_ok"] = sup["cls"].isin(["sbt_ps", "sbt_cpap"])
+    sup["arm"] = sup["cls"].map({"sbt_ps": "ps", "sbt_cpap": "cpap"}).fillna("")
+    return sup[cols].reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------

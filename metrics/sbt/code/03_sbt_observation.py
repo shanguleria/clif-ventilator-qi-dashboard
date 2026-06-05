@@ -131,6 +131,52 @@ def attribute_episode_durations(days: pd.DataFrame, trans: pd.DataFrame) -> pd.D
     return out[cols]
 
 
+def attribute_attempt_subsets(days: pd.DataFrame, eps: pd.DataFrame, min_min: float) -> pd.DataFrame:
+    """Per (encounter_block, icu_day): the 7 native numerator-subset bits (plan 04).
+
+    For each subset S of the three trial-quality criteria {transition(T), >=2min(D),
+    low-PEEP(P)}, the day-bit is "exists an attempt episode (ep_start in the day) meeting
+    ALL criteria in S together" — an episode-level conjunction, not a day-level AND of
+    separate events. The empty subset (on_spontaneous) is handled separately (native+scaffold
+    presence). Columns: nb_t, nb_d, nb_p, nb_td, nb_tp, nb_dp, nb_tdp.
+    Reconciliation: nb_tp == legacy sbt_delivered_any; nb_tdp == legacy sbt_delivered.
+    """
+    base = days[["encounter_block", "icu_day", "day_in", "day_out"]].copy()
+    base["encounter_block"] = base["encounter_block"].astype(str)
+    nb = ["nb_t", "nb_d", "nb_p", "nb_td", "nb_tp", "nb_dp", "nb_tdp"]
+    cols = ["encounter_block", "icu_day"] + nb
+    if eps is None or eps.empty:
+        for c in nb:
+            base[c] = False
+        return base[cols]
+    e = eps.copy()
+    e["encounter_block"] = e["encounter_block"].astype(str)
+    con = duckdb.connect()
+    con.register("d", base)
+    con.register("e", e)
+    out = con.execute(
+        f"""
+        SELECT d.encounter_block AS encounter_block, d.icu_day AS icu_day,
+               MAX(CASE WHEN e.is_transition THEN 1 ELSE 0 END) > 0                          AS nb_t,
+               MAX(CASE WHEN e.dur_min >= {float(min_min)} THEN 1 ELSE 0 END) > 0            AS nb_d,
+               MAX(CASE WHEN e.peep_ok THEN 1 ELSE 0 END) > 0                                AS nb_p,
+               MAX(CASE WHEN e.is_transition AND e.dur_min >= {float(min_min)} THEN 1 ELSE 0 END) > 0 AS nb_td,
+               MAX(CASE WHEN e.is_transition AND e.peep_ok THEN 1 ELSE 0 END) > 0            AS nb_tp,
+               MAX(CASE WHEN e.dur_min >= {float(min_min)} AND e.peep_ok THEN 1 ELSE 0 END) > 0 AS nb_dp,
+               MAX(CASE WHEN e.is_transition AND e.dur_min >= {float(min_min)} AND e.peep_ok
+                        THEN 1 ELSE 0 END) > 0                                               AS nb_tdp
+        FROM d LEFT JOIN e
+          ON d.encounter_block = e.encounter_block
+         AND e.ep_start >= d.day_in AND e.ep_start < d.day_out
+        GROUP BY d.encounter_block, d.icu_day
+        """
+    ).fetchdf()
+    con.close()
+    for c in nb:
+        out[c] = out[c].fillna(False).astype(bool)
+    return out[cols]
+
+
 def main() -> None:
     cohort_mod = _load_cohort_module()
     cohort_mod._ensure_dirs()
@@ -170,11 +216,20 @@ def main() -> None:
     spont = sd.support_presence_days(wf, elig, cfg)
     # total minutes on a support mode per day (duration measure for the spontaneous view)
     spont_min = sd.support_minutes_days(wf, elig, cfg)
+    # exclusion-toggle model: per-day numerator-subset bits from ALL native support episodes
+    eps = sd.support_episodes(wf, cfg)
+    log.info("native support episodes: %d  (transitions: %d, low-PEEP: %d)",
+             len(eps), int(eps["is_transition"].sum()) if not eps.empty else 0,
+             int(eps["peep_ok"].sum()) if not eps.empty else 0)
+    nb_flags = attribute_attempt_subsets(elig, eps, min_min)
 
     out = (elig
            .merge(obs_flags, on=["encounter_block", "icu_day"], how="left")
            .merge(spont, on=["encounter_block", "icu_day"], how="left")
-           .merge(spont_min, on=["encounter_block", "icu_day"], how="left"))
+           .merge(spont_min, on=["encounter_block", "icu_day"], how="left")
+           .merge(nb_flags, on=["encounter_block", "icu_day"], how="left"))
+    for c in ("nb_t", "nb_d", "nb_p", "nb_td", "nb_tp", "nb_dp", "nb_tdp"):
+        out[c] = out[c].fillna(False).astype(bool)
     out["sbt_delivered"] = out["sbt_delivered"].fillna(False).astype(bool)
     out["sbt_delivered_any"] = out["sbt_delivered_any"].fillna(False).astype(bool)
     out["on_spontaneous"] = out["on_spontaneous"].fillna(False).astype(bool)
@@ -190,6 +245,30 @@ def main() -> None:
     if bad_nest:
         raise RuntimeError(f"numerator nesting violated on {int(bad_nest)} days "
                            "(strict ⊆ any-duration ⊆ on-spontaneous)")
+
+    # --- exclusion-toggle reconciliation (plan 04) -----------------------------------
+    # The new episode engine must reproduce the legacy transition engine exactly:
+    #   nb_tp  (transition & low-PEEP)            == sbt_delivered_any   (per day)
+    #   nb_tdp (transition & low-PEEP & >=2min)   == sbt_delivered       (per day)
+    mism_any = int((out["nb_tp"] != out["sbt_delivered_any"]).sum())
+    mism_str = int((out["nb_tdp"] != out["sbt_delivered"]).sum())
+    if mism_any or mism_str:
+        raise RuntimeError(f"episode-engine reconciliation failed: nb_tp!=any on {mism_any} days, "
+                           f"nb_tdp!=strict on {mism_str} days")
+    # Down-closure: every non-empty subset bit implies on_spontaneous (the empty subset).
+    nb_cols = ["nb_t", "nb_d", "nb_p", "nb_td", "nb_tp", "nb_dp", "nb_tdp"]
+    bad_dc = int(sum((out[c] & ~out["on_spontaneous"]).sum() for c in nb_cols))
+    if bad_dc:
+        raise RuntimeError(f"down-closure violated: {bad_dc} subset-day bits set without on_spontaneous")
+    n = len(out)
+    log.info("exclusion-toggle endpoints (all vent-ICU days, n=%d):", n)
+    log.info("  baseline  on_spontaneous {}            : %6d (%.1f%%)",
+             int(out["on_spontaneous"].sum()), 100*out["on_spontaneous"].sum()/max(n, 1))
+    log.info("  +transition           nb_t             : %6d", int(out["nb_t"].sum()))
+    log.info("  +transition+low-PEEP  nb_tp  (==any)   : %6d", int(out["nb_tp"].sum()))
+    log.info("  strict     nb_tdp (==sbt_delivered)    : %6d", int(out["nb_tdp"].sum()))
+    log.info("  reconciliation OK: nb_tp==any, nb_tdp==strict, down-closure holds")
+
     out.to_parquet(inter / "sbt_observation.parquet", index=False)
 
     # Per-transition-episode durations (PHI-free) for the dashboard duration panel.

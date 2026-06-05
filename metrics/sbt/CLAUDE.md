@@ -69,29 +69,52 @@ NEE timeline is the sum of concurrent per-drug step functions, sampled onto scaf
 pressor with missing weight makes that hour **un-assessable** (not silently 0). Swap to Jain's exact
 factors in config if obtained.
 
-### SBT delivered (numerators) — strict (Jain headline) + two liberal views
-The **strict** numerator (the by-the-book Jain headline) is a **controlled→support mode transition**
-sustained ≥ `support_min_minutes` (default 2), where the support episode is `pressure support/cpap` with
-**PEEP ≤ 8** (pressure-support arm) or **PEEP ≤ 5** (CPAP arm). Detection runs on the
-**native-resolution** waterfall rows (not the hourly scaffold) so sub-hourly trials are visible where
-charted. Transition-only: a patient parked on support all day with no controlled→support edge does **not**
-count toward the strict numerator.
+### The rate — one rate, broadest-by-default, exclusions as toggles (plan 04, 2026-06-05)
+The dashboard presents **one** SBT rate. With **every toggle off** it is the broadest lens —
+**numerator = any spontaneous-mode presence that day** (`on_spontaneous`) ÷ **denominator = all vent-ICU
+patient-days** (UChicago **39,823 / 110,898 = 35.9%**). Eight **fixed-effect exclusion toggles** then
+constrain it. See `plans/04_sbt_exclusion_toggle_model.md`. With **all eight on** = strict SBT among
+**transition candidates** = **8,706 / 34,436 = 25.3%** — this is the **scorecard tile headline**
+(`04` emits `n_eligible_txcand`; tile `cells("n_sbt","n_eligible_txcand")`). It exceeds the legacy
+all-eligible rate (**8,706 / 43,310 = 20.1%**, retained as the `sbt_delivered_legacy` federation row)
+because the "require transition" toggle also drops eligible parked-on-spontaneous days from the
+denominator (see below). The clinical definitions follow Jain et al. (CCM; see References).
 
-Per leadership (2026-06-04), to see "what is actually happening" the dashboard surfaces **three nested
-numerators** (`strict ⊆ any-duration ⊆ on-spontaneous`, asserted in 03/04) against **two denominators**
-(eligible days, or all vent-ICU days), with a Numerator × Denominator toggle:
-- **`sbt_delivered`** — strict transition ≥ `support_min_minutes` (above).
-- **`sbt_delivered_any`** — a controlled→support transition of **any duration** (drops only the ≥2-min
-  floor; arm/PEEP qualification kept). At UChicago this barely exceeds strict — almost all trials already
-  last ≥2 min, so the floor is not the binding constraint.
-- **`on_spontaneous`** — on **any** support mode at all that day (no transition required, **no PEEP gate**);
-  a patient parked on pressure-support/CPAP counts here only. This is the broadest prevalence view and
-  is ~2× the transition rate, capturing never-controlled / parked-on-support patients.
+Because a numerator day must be a denominator day, toggles act in two ways:
+- **Candidate-day filters (denominator)** — remove vent-days from the denominator (carrying their attempt
+  out of the numerator too): ① exclude tracheostomy · ② exclude continuous paralytic · ③ require ≥12h
+  controlled accrued · ④ require ≥2h stable **oxygenation** (FiO₂≤0.50/PEEP≤8/SpO₂≥88) · ⑤ require ≥2h
+  **low vasopressors** (NEE≤0.2; low-dose allowed, only days above 0.2 excluded) · ⑥ **require a
+  controlled→support transition**. Stability ④/⑤ are independent (vasopressor split out, per the
+  cross-institution concern); when both on, one ≥2h window must satisfy all four criteria together.
+  ⑥ is **den + num** and grouped here (user decision 2026-06-05): requiring a transition changes the
+  question to *transitions specifically*, so a day already parked on a spontaneous mode with no transition
+  (`on_spontaneous ∧ ¬nb_t`) is dropped from the denominator too — it is not a transition candidate, not a
+  missed SBT. Implemented in the JS engine (`maskPassesDen`) using the existing `on_spontaneous`/`nb_t` bits
+  (no new bit / no rerun); at UChicago it trims 8,874 eligible days (all-on 20.1% → 25.3%).
+- **Trial-quality filters (numerator)** — ⑦ require the support episode sustained ≥2 min · ⑧ require low
+  PEEP on support (≤8 PS / ≤5 CPAP). These keep the day in the denominator and only change whether its
+  attempt counts.
 
-The dashboard's **"Where the Vent-ICU Days Go"** panel decomposes all vent-ICU days into received / eligible-
-but-no-trial (missed) / not-eligible (justified by exclusion), with the "% of non-SBT days justified" call-
-out. Patient-level (`Both day + patient`) secondary stats accompany each view (numerator matched to the
-denominator mode so num ⊆ den). The strict-SBT / eligible-days view remains the scorecard tile headline.
+The on-screen **catalogue panel** documents every toggle and what it removes (num/den/both). The
+**exclusion waterfall** panel replaces the old received/missed/justified decomposition and the
+"Why not eligible?" sub-bar: it peels all vent-days by each **active** denominator toggle (catalogue order;
+a stage row appears only when its toggle is on) down to the denominator, then shows the numerator within it
+(fill = the live rate). Default load =
+broadest (all off); a **Reset** button returns there.
+
+**Data model:** `02` emits 6 raw per-day denominator bits (`db_trach, db_paralytic, db_accrued12,
+db_stable_oxy, db_stable_vaso, db_stable_both`); `03` emits 8 numerator-subset bits from per-day **attempt
+episodes** (`sbt_detect.support_episodes` → every native support stretch with `{is_transition, dur_min,
+peep_ok}`; the subset bit = "∃ an episode meeting all active criteria together"). `04` packs these into a
+14-bit per-day mask (`MASK_BITS`) and writes a per-(unit,period) **mask histogram**
+(`metrics_masks.parquet` + `metrics_masks_bits.json`); `05` embeds it and the toggle engine sums num/den
+**live in JS** per the active toggles. Reconciliation asserts (03): `nb_tp == sbt_delivered_any`,
+`nb_tdp == sbt_delivered`, down-closure ⊆ `on_spontaneous`. The three stability windows live in
+`sbt_detect.hourly_stability_window` (`stable_window` = all four, `stable_window_no_ne` = oxygenation only,
+`stable_window_ne_only` = vasopressor only). **Scorecard tile headline = strict SBT / transition-candidate
+days = 25.3%** (follows the "require transition" den+num rule); the legacy all-eligible 20.1% is kept as a
+federation summary row (`sbt_delivered_legacy`).
 
 ### Documentation / data-quality caveats (carried in the tile `note`)
 - **Charting cadence:** a ≥2-min support episode can be invisible at sites charting ventilator settings
