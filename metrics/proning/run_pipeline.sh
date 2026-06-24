@@ -34,6 +34,7 @@ run_step() {
 
 run_step "01 build cohort"        python code/01_build_cohort.py
 run_step "02 proning eligibility" python code/02_proning_eligibility.py
+run_step "02b T0 treatments"      python code/02b_t0_treatments.py
 run_step "03 proning observation" python code/03_proning_observation.py
 run_step "04 metrics"             python code/04_metrics.py
 run_step "05 dashboard"           python code/05_dashboard.py

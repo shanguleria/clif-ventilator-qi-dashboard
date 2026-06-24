@@ -31,6 +31,7 @@ import sys
 from pathlib import Path
 
 import duckdb
+import numpy as np
 import pandas as pd
 
 import clifpy
@@ -96,6 +97,19 @@ def load_abgs_cached(co: clifpy.ClifOrchestrator) -> pd.DataFrame:
     df = co.labs.df
     df.to_parquet(cpath("abgs"), index=False)
     log.info("wrote cache: abgs (%d rows)", len(df))
+    return df
+
+
+def load_spo2_cached(co: clifpy.ClifOrchestrator, hosp_ids: list[str]) -> pd.DataFrame:
+    """SpO2 vitals for the (arterial-gas-having) cohort hospitalizations — used for the
+    S/F surrogate onset definition. Scoped to the same hospitalizations as the waterfall."""
+    if cpath("spo2").exists():
+        log.info("cache hit: spo2")
+        return pd.read_parquet(cpath("spo2"))
+    co.load_table("vitals", filters={"hospitalization_id": hosp_ids, "vital_category": ["spo2"]})
+    df = co.vitals.df[["hospitalization_id", "recorded_dttm", "vital_value"]].copy()
+    df.to_parquet(cpath("spo2"), index=False)
+    log.info("wrote cache: spo2 (%d rows)", len(df))
     return df
 
 
@@ -246,7 +260,39 @@ def attach_vent_and_compute_pf(abg: pd.DataFrame, wf: pd.DataFrame, tz: str) -> 
     return pf.loc[in_band].copy()
 
 
-def restrict_to_icu(pf: pd.DataFrame, adt_s: pd.DataFrame) -> pd.DataFrame:
+def extract_spo2(spo2_df: pd.DataFrame, mapping: pd.DataFrame) -> pd.DataFrame:
+    s = spo2_df.copy()
+    s["spo2"] = pd.to_numeric(s["vital_value"], errors="coerce")
+    s = s[s["spo2"].between(1, 100)]
+    s = s.rename(columns={"recorded_dttm": "sf_time"})[["hospitalization_id", "sf_time", "spo2"]]
+    s = s.merge(mapping[["hospitalization_id", "encounter_block"]], on="hospitalization_id", how="left")
+    s = s.dropna(subset=["sf_time", "encounter_block"])
+    log.info("SpO2 events: %d (across %d encounter_blocks)", len(s), s["encounter_block"].nunique())
+    return s
+
+
+def attach_vent_and_compute_sf(spo2_ev: pd.DataFrame, wf: pd.DataFrame, tz: str) -> pd.DataFrame:
+    """S/F = SpO2 / FiO2, pairing each SpO2 with the most recent vent state (≤6h, like P/F)."""
+    cols = ["encounter_block", "recorded_dttm", "device_category", "peep_set",
+            "fio2_set", "mode_category"]
+    wf_s = wf[cols].dropna(subset=["encounter_block", "recorded_dttm"]).copy()
+    wf_s["recorded_dttm"] = _coerce_dttm(wf_s["recorded_dttm"], tz)
+    sf = spo2_ev.copy()
+    sf["sf_time"] = _coerce_dttm(sf["sf_time"], tz)
+    wf_s = wf_s.sort_values("recorded_dttm")
+    sf_s = sf.sort_values("sf_time")
+    m = pd.merge_asof(
+        sf_s, wf_s,
+        left_on="sf_time", right_on="recorded_dttm",
+        by="encounter_block", direction="backward", tolerance=pd.Timedelta("6h"),
+    )
+    m = m.dropna(subset=["fio2_set"])
+    m["sf_ratio"] = m["spo2"] / m["fio2_set"]
+    in_band = m["sf_ratio"].between(20, 2000)
+    return m.loc[in_band].copy()
+
+
+def restrict_to_icu(pf: pd.DataFrame, adt_s: pd.DataFrame, time_col: str = "abg_time") -> pd.DataFrame:
     if "encounter_block" not in adt_s.columns:
         raise RuntimeError("adt was not stitched — missing encounter_block")
     icu = adt_s.loc[
@@ -257,54 +303,84 @@ def restrict_to_icu(pf: pd.DataFrame, adt_s: pd.DataFrame) -> pd.DataFrame:
     con.register("pf", pf)
     con.register("icu", icu)
     joined = con.execute(
-        """
+        f"""
         SELECT pf.*,
                icu.in_dttm  AS icu_in_dttm,
                icu.out_dttm AS icu_out_dttm
         FROM pf
         JOIN icu
           ON pf.encounter_block = icu.encounter_block
-         AND pf.abg_time BETWEEN icu.in_dttm AND icu.out_dttm
+         AND pf.{time_col} BETWEEN icu.in_dttm AND icu.out_dttm
         """
     ).fetchdf()
     con.close()
     joined = (
-        joined.sort_values(["encounter_block", "abg_time", "icu_in_dttm"])
-        .drop_duplicates(subset=["encounter_block", "abg_time"], keep="first")
+        joined.sort_values(["encounter_block", time_col, "icu_in_dttm"])
+        .drop_duplicates(subset=["encounter_block", time_col], keep="first")
     )
-    log.info("ABGs in ICU: %d (from %d pre-ICU-filter)", len(joined), len(pf))
+    log.info("events in ICU (%s): %d (from %d pre-ICU-filter)", time_col, len(joined), len(pf))
     return joined
 
 
 # ---------------------------------------------------------------------------
 # T₀: ARDS screening
 # ---------------------------------------------------------------------------
-def compute_t0(pf_icu: pd.DataFrame, hosp_s: pd.DataFrame) -> pd.DataFrame:
+def compute_t0(pf_icu: pd.DataFrame, sf_icu: pd.DataFrame | None,
+               hosp_s: pd.DataFrame, screen: dict) -> pd.DataFrame:
+    """Earliest ARDS-qualifying event per encounter_block (one row per block).
+
+    A time point qualifies if: on IMV, PEEP ≥ peep_min, FiO2 ≥ fio2_min, in an ICU, age ≥ 18,
+    AND oxygenation is severe by EITHER an arterial P/F ≤ pf_max OR — when no arterial gas
+    qualifies — the S/F surrogate (SpO2/FiO2 ≤ sf_max while SpO2 ≤ spo2_max). T0 = the earliest
+    such event (across both sources)."""
+    pf_max = screen.get("pf_max", 300)
+    fio2_min = screen.get("fio2_min", 0.4)
+    peep_min = screen.get("peep_min", 5)
+    use_sf = screen.get("use_sf_surrogate", True)
+    sf_max = screen.get("sf_max", 315)
+    spo2_max = screen.get("spo2_max", 97)
     hp = hosp_s[["hospitalization_id", "patient_id", "age_at_admission"]].drop_duplicates()
-    pf_icu = pf_icu.merge(hp, on="hospitalization_id", how="left")
-    candidates = pf_icu[
-        (pf_icu["device_category"] == IMV_CATEGORY)
-        & (pf_icu["peep_set"] >= 5)
-        & (pf_icu["fio2_set"] >= 0.4)
-        & (pf_icu["pf_ratio"] <= 300)
-        & (pf_icu["age_at_admission"] >= 18)
+
+    common = ["encounter_block", "hospitalization_id", "patient_id", "age_at_admission",
+              "t0_time", "pao2_at_t0", "fio2_at_t0", "peep_at_t0", "pf_at_t0",
+              "spo2_at_t0", "sf_at_t0", "t0_source", "icu_in_dttm_at_t0"]
+
+    pf = pf_icu.merge(hp, on="hospitalization_id", how="left")
+    pf_cand = pf[
+        (pf["device_category"] == IMV_CATEGORY) & (pf["peep_set"] >= peep_min)
+        & (pf["fio2_set"] >= fio2_min) & (pf["pf_ratio"] <= pf_max)
+        & (pf["age_at_admission"] >= 18)
     ].copy()
-    t0 = (
-        candidates.sort_values("abg_time")
-        .drop_duplicates(subset=["encounter_block"], keep="first")
-        .rename(columns={
-            "abg_time": "T0",
-            "pao2": "pao2_at_t0",
-            "fio2_set": "fio2_at_t0",
-            "peep_set": "peep_at_t0",
-            "pf_ratio": "pf_at_t0",
-            "icu_in_dttm": "icu_in_dttm_at_t0",
-        })
-    )
-    return t0[[
-        "encounter_block", "hospitalization_id", "patient_id", "age_at_admission",
-        "T0", "pao2_at_t0", "fio2_at_t0", "peep_at_t0", "pf_at_t0", "icu_in_dttm_at_t0",
-    ]]
+    pf_cand = pf_cand.rename(columns={
+        "abg_time": "t0_time", "pao2": "pao2_at_t0", "fio2_set": "fio2_at_t0",
+        "peep_set": "peep_at_t0", "pf_ratio": "pf_at_t0", "icu_in_dttm": "icu_in_dttm_at_t0"})
+    pf_cand["spo2_at_t0"] = np.nan
+    pf_cand["sf_at_t0"] = np.nan
+    pf_cand["t0_source"] = "pf"
+    frames = [pf_cand[common]]
+
+    if use_sf and sf_icu is not None and not sf_icu.empty:
+        sf = sf_icu.merge(hp, on="hospitalization_id", how="left")
+        sf_cand = sf[
+            (sf["device_category"] == IMV_CATEGORY) & (sf["peep_set"] >= peep_min)
+            & (sf["fio2_set"] >= fio2_min) & (sf["spo2"] <= spo2_max)
+            & (sf["sf_ratio"] <= sf_max) & (sf["age_at_admission"] >= 18)
+        ].copy()
+        sf_cand = sf_cand.rename(columns={
+            "sf_time": "t0_time", "fio2_set": "fio2_at_t0", "peep_set": "peep_at_t0",
+            "spo2": "spo2_at_t0", "sf_ratio": "sf_at_t0", "icu_in_dttm": "icu_in_dttm_at_t0"})
+        sf_cand["pao2_at_t0"] = np.nan
+        sf_cand["pf_at_t0"] = np.nan
+        sf_cand["t0_source"] = "sf"
+        frames.append(sf_cand[common])
+
+    cand = pd.concat(frames, ignore_index=True)
+    t0 = (cand.sort_values("t0_time")
+          .drop_duplicates(subset=["encounter_block"], keep="first")
+          .rename(columns={"t0_time": "T0"}))
+    return t0[["encounter_block", "hospitalization_id", "patient_id", "age_at_admission",
+               "T0", "pao2_at_t0", "fio2_at_t0", "peep_at_t0", "pf_at_t0",
+               "spo2_at_t0", "sf_at_t0", "t0_source", "icu_in_dttm_at_t0"]]
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +409,7 @@ def assemble_cohort_row(
         "patient_id", "encounter_block", "hospitalization_id", "hospitalization_ids",
         "icu_in_dttm_at_t0",
         "T0", "pao2_at_t0", "fio2_at_t0", "peep_at_t0", "pf_at_t0",
+        "spo2_at_t0", "sf_at_t0", "t0_source",
         "age_at_admission", "sex_category", "race_category", "ethnicity_category",
         "admission_type_category", "admission_dttm", "discharge_dttm", "discharge_category",
         "death_dttm",
@@ -372,6 +449,7 @@ def main() -> None:
     tz = cfg["timezone"]
     log.info("site=%s timezone=%s", cfg.get("site"), tz)
 
+    screen = cfg.get("ards_cohort", {})
     co = build_orchestrator(cfg)
     load_small_tables(co)
     hosp_s, adt_s, mapping = stitch_cached(co)
@@ -380,11 +458,23 @@ def main() -> None:
 
     abg = extract_abgs(abg_df, mapping)
     pf = attach_vent_and_compute_pf(abg, wf, tz)
-    pf_icu = restrict_to_icu(pf, adt_s)
+    pf_icu = restrict_to_icu(pf, adt_s, time_col="abg_time")
 
-    t0 = compute_t0(pf_icu, hosp_s)
-    log.info("encounters with a T₀: %d (patients: %d)",
-             t0["encounter_block"].nunique(), t0["patient_id"].nunique())
+    # S/F surrogate (config ards_cohort.use_sf_surrogate): backfill onset from SpO2 when no
+    # qualifying arterial P/F. Scoped to the same (arterial-gas-having) hospitalizations as the
+    # waterfall, so it reclassifies onset for those; pure-SpO2-only patients need a wider waterfall.
+    sf_icu = None
+    if screen.get("use_sf_surrogate", True):
+        abg_hosp_ids = abg_df["hospitalization_id"].dropna().astype(str).unique().tolist()
+        spo2_df = load_spo2_cached(co, abg_hosp_ids)
+        sf_ev = extract_spo2(spo2_df, mapping)
+        sf = attach_vent_and_compute_sf(sf_ev, wf, tz)
+        sf_icu = restrict_to_icu(sf, adt_s, time_col="sf_time")
+
+    t0 = compute_t0(pf_icu, sf_icu, hosp_s, screen)
+    src = t0["t0_source"].value_counts().to_dict()
+    log.info("encounters with a T₀: %d (patients: %d) — T₀ source: %s",
+             t0["encounter_block"].nunique(), t0["patient_id"].nunique(), src)
 
     # One row per patient — earliest T₀
     t0_one = t0.sort_values("T0").drop_duplicates(subset=["patient_id"], keep="first")

@@ -44,12 +44,28 @@ Thresholds live in `config/config.json` under `proning_eligibility` so sites can
 ### Proning observation
 Reconstructed from the CLIF `position` table. Sessions are contiguous runs of `position_category == "prone"`; gaps > `proning_observation.session_gap_minutes` (default 60 min) end a session. A session ≥ `proning_observation.adherent_session_hours` (default 16 h) counts as PROSEVA-adherent.
 
-### QI metrics (Option C — bounded denominator)
-The UChicago `position` table charts only proning episodes (only ~19 % of eligible have any position record; all of those were proned), so the adherence rate is reported as a **bound**, not a single number:
+### QI metrics
+The UChicago `position` table charts only proning episodes (only ~19 % of eligible have any position record; all of those were proned), so **ever-proned is a process floor** (no-position-data imputed not-proned):
 - **Process rate (tile headline):** ever-proned / all eligible = 350/1,854 = **18.9 %**.
-- **Lower bound:** adherent ≥16 h / all eligible = 213/1,854 = **11.5 %** (no-data imputed not-adherent).
-- **Upper bound:** adherent ≥16 h / charted subset = 213/350 = **60.9 %**.
-- **Time-to-prone:** median (IQR) hours `T_eligible`→first prone among proned, plus a 7-day cumulative-incidence CDF over all eligible (non-proned treated as event-free, not censored).
+- **First-prone-session duration (replaces the old "adherent ≥16 h" framing, 2026-06-24):** the
+  distribution of the *first* prone session's duration (start→end of session 1) among proned
+  patients — median (IQR) + a clinical-bin histogram. UChicago median ≈ **14 h (IQR 3–21 h)**.
+  Surfaced in the dashboard's "How long is the first prone session?" panel and in the tile `note`.
+  The `n_adherent` ≥16 h count is still computed and kept in `metrics_site_summary.csv` for
+  federation back-compat, but is no longer shown in the dashboard or tile.
+- **Time-to-prone:** median (IQR) hours `T_eligible`→first prone among proned, plus a 7-day
+  cumulative-incidence CDF over all eligible (non-proned treated as event-free, not censored).
+- **Reactivity (2026-06-24):** the first-session-duration panel, the time-to-prone CDF, and Table 1
+  are all reactive to the Unit × time-period controls (embedded per-slice in
+  `dashboard_payload.json` over all/year/month; weekly is too sparse for these panels).
+- **IMV-era timeline + awake proning (2026-06-24):** the time-to-prone clocks and first-session
+  duration are computed over the **first prone session starting ≥ T₀** (`04 attach_imv_prone`). Prone
+  sessions before T₀ are **awake / pre-intubation proning** (COVID-era HFNC/NIV proning of severely
+  hypoxemic patients intubated later — confirmed by probes `code/00_probe_t0_*.py`: 77 % in 2020–21,
+  83 % not on IMV at a severe pre-prone gas); they are **flagged** (`awake_proned`, federation row) and
+  **excluded from timing**, but still count in **ever-proned** (`any_prone`, the unchanged tile
+  headline). An **S/F surrogate onset** (config `ards_cohort.use_sf_surrogate`, default **off**) is a
+  sensitivity option (enlarges the cohort ~32 % but doesn't change the awake-proning finding).
 
 Observation is joined to eligibility at the **encounter_block grain** — each eligible block aggregates over *all* of its `hospitalization_ids` (a prone session may be charted under any stitched id). `04_metrics.py` emits `metrics_site_summary.csv` (federation-shareable) and `tile_feed_proning.json` for the lpv bundle scorecard (see References).
 
@@ -73,18 +89,21 @@ config/
 code/
   01_build_cohort.py          # ARDS screening → T₀ → cohort.parquet
   02_proning_eligibility.py   # PROSEVA-strict 12h sustained window
-  03_proning_observation.py   # prone sessions from position table
-  04_metrics.py               # QI rates (Option C bounds) + unit/period slices + site summary + scorecard tile feed
-  05_dashboard.py             # interactive HTML dashboard (filterable cards + trend, CONSORT, Table 1, CDF)
+  02b_t0_treatments.py        # vaso/NMB presence + set Vt at T₀ (PROSEVA Table-1) → t0_treatments.parquet
+  03_proning_observation.py   # prone sessions (+ first-session duration) from position table
+  04_metrics.py               # QI rates + unit/period slices + site summary + tile feed + dashboard_payload.json
+  05_dashboard.py             # interactive HTML dashboard (reactive cards/trend, duration histogram, time-to-prone CDF, reactive Table 1)
 output/
   intermediate/
     _cache/                   # checkpoints (abgs, waterfall, stitched, mapping)
     cohort.parquet            # ARDS cohort, one row per patient
     proning_eligibility.parquet
+    t0_treatments.parquet     # vaso/NMB/Vt at T₀ per encounter_block (02b)
     prone_sessions.parquet
     proning_observation.parquet
     metrics_patient_level.parquet             # per-eligible detail + unit/period keys (keeps ids; not shared)
     metrics_slices.parquet                    # full counts per unit×granularity×period (dashboard embeds this)
+    dashboard_payload.json                    # per-slice distributions + reactive Table 1 (PHI-free; 05 embeds this)
   final/
     cohort_flow.csv           # CONSORT counts
     metrics_site_summary.csv  # consortium-aggregable (counts + rates only)
@@ -109,9 +128,11 @@ run_pipeline.sh               # entry point — timestamped log → output/logs/
 | `patient` | demographics, death_dttm |
 | `hospitalization` | admission/discharge times, age_at_admission |
 | `adt` | ICU localization (`location_category == "icu"`) |
-| `respiratory_support` | vent mode, PEEP, FiO2, extubation events |
-| `labs` | arterial PaO2 (`lab_category == "po2_arterial"`) |
+| `respiratory_support` | vent mode, PEEP, FiO2, set tidal volume, extubation events |
+| `labs` | arterial PaO2 (`lab_category == "po2_arterial"`) — P/F at T₀ |
+| `vitals` | SpO2 (`vital_category == "spo2"`) — S/F surrogate onset (config `ards_cohort.use_sf_surrogate`, default off) |
 | `position` | prone session detection (used in stage 03) |
+| `medication_admin_continuous` | vasopressor + continuous-NMB presence at T₀ (stage 02b; PROSEVA Table-1 rows) |
 | `patient_assessments` | reserved for awake-prone / RASS sub-analyses |
 
 Primary dataset: **UChicago CLIF v2.1.0**.

@@ -15,7 +15,8 @@ Outputs:
             hospitalization_id, position_data_present (bool),
             any_prone (bool), n_sessions (int), total_prone_hours (float),
             any_session_>=_adherent (bool), longest_session_hours (float),
-            first_prone_dttm (datetime), last_prone_end_dttm (datetime).
+            first_session_duration_hours (float), first_prone_dttm (datetime),
+            last_prone_end_dttm (datetime).
 
 UChicago coverage caveat (2026-04-28 probe): only ~19 % of PROSEVA-eligible
 hospitalizations have any position records at all. Patients with zero
@@ -141,6 +142,10 @@ def aggregate_per_hospitalization(
             any_adherent = bool((g["duration_hours"] >= adherent_hours).any())
             first_start = g["session_start_dttm"].min()
             last_end = g["session_end_dttm"].max()
+            # Duration of the FIRST prone session (earliest start) — the headline
+            # "how long was the initial prone attempt" metric.
+            first_row = g.loc[g["session_start_dttm"].idxmin()]
+            first_session_h = float(first_row["duration_hours"])
             any_prone = True
         else:
             n_sessions = 0
@@ -149,6 +154,7 @@ def aggregate_per_hospitalization(
             any_adherent = False
             first_start = pd.NaT
             last_end = pd.NaT
+            first_session_h = np.nan
             any_prone = False
         rows.append({
             "hospitalization_id": hid,
@@ -157,6 +163,7 @@ def aggregate_per_hospitalization(
             "n_sessions": n_sessions,
             "total_prone_hours": total_h,
             "longest_session_hours": longest_h,
+            "first_session_duration_hours": first_session_h,
             "any_session_adherent": any_adherent,
             "first_prone_dttm": first_start,
             "last_prone_end_dttm": last_end,

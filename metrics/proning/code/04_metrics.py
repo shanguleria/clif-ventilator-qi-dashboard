@@ -52,6 +52,57 @@ log = logging.getLogger("proning.metrics")
 # Cumulative-incidence horizons (hours after T_eligible) reported in the CDF.
 CDF_HORIZONS_H = [24, 48, 72, 168]
 
+# First-prone-session duration histogram (clinical bins, hours). Left edges; the
+# final bin is open-ended (>= last edge). Surfaced in the dashboard's "How long is
+# the first prone session?" panel.
+FSD_BIN_EDGES = [0, 4, 8, 12, 16, 24, 48]
+FSD_BIN_LABELS = ["<4h", "4–8h", "8–12h", "12–16h", "16–24h", "24–48h", "≥48h"]
+
+# Time-to-prone cumulative-incidence sampling grid (hours after T_eligible). The
+# dashboard draws a per-slice CDF = (count proned with ttp <= h) / n_eligible.
+TTP_GRID_H = [0, 6, 12, 24, 36, 48, 72, 96, 120, 144, 168]
+
+# Heavy reactive panels (duration histogram, TTP CDF, Table 1) are embedded only
+# for these granularities — weekly is too sparse for proning's N (cards/trend keep
+# weekly via metrics_slices).
+DIST_GRANS = ("all", "year", "month")
+
+# Site-stored categorical values → display labels (mirrors 05_dashboard.py; kept here
+# because 04 now owns the Table-1 component computation that 05 renders).
+CATEGORICAL_DISPLAY = {
+    "admission_type_category": {
+        "ed": "Emergency dept.", "osh": "Outside-hospital transfer",
+        "direct": "Direct admission", "facility": "Facility transfer",
+    },
+    "sex_category": {"male": "Male", "female": "Female"},
+}
+
+# Table-1 variable spec (order preserved in the rendered table). The three at-T₀
+# treatment rows (vasopressors / NMB / set Vt) describe the cohort PROSEVA-style at
+# the same T₀ anchor as the physiology rows.
+TABLE1_SPEC = [
+    ("cont", "Age (years)", "age_at_admission"),
+    ("cat", "Sex", "sex_category"),
+    ("cat", "Race", "race_category"),
+    ("cat", "Ethnicity", "ethnicity_category"),
+    ("cat", "Admission type", "admission_type_category"),
+    # Physiology + treatments at BOTH anchors (T₀ then T_eligible, paired for comparison —
+    # see how severity/support escalate between ARDS onset and the proning decision-point).
+    ("cont", "P/F ratio at T₀ (mmHg)", "pf_at_t0"),
+    ("cont", "P/F ratio at T_eligible (mmHg)", "pf_at_te"),
+    ("cont", "FiO₂ at T₀ (fraction)", "fio2_at_t0"),
+    ("cont", "FiO₂ at T_eligible (fraction)", "fio2_at_te"),
+    ("cont", "PEEP at T₀ (cmH₂O)", "peep_at_t0"),
+    ("cont", "PEEP at T_eligible (cmH₂O)", "peep_at_te"),
+    ("cont", "Set tidal volume at T₀ (mL)", "vt_set_at_t0"),
+    ("cont", "Set tidal volume at T_eligible (mL)", "vt_set_at_te"),
+    ("bin", "On vasopressors at T₀", "on_vasopressor_at_t0"),
+    ("bin", "On vasopressors at T_eligible", "on_vasopressor_at_te"),
+    ("bin", "On neuromuscular blockade at T₀", "on_nmb_at_t0"),
+    ("bin", "On neuromuscular blockade at T_eligible", "on_nmb_at_te"),
+    ("bin", "In-hospital mortality", "in_hospital_mortality"),
+]
+
 # Canonical ICU unit slugs (CLIF location_type) shared with the bundle-scorecard
 # tile contract (lpv/plans/02_scorecard_tile_contract.md §3). location_type at
 # this site is already exactly these values; "unknown" (T_eligible falling in a
@@ -111,6 +162,14 @@ def aggregate_observation_to_eligible(
         present = [h for h in hids if h in obs_by_hid.index]
         if present:
             sub = obs_by_hid.loc[present]
+            if isinstance(sub, pd.Series):       # single hid → DataFrame for uniform access
+                sub = sub.to_frame().T
+            # First-session duration tied to the EARLIEST first_prone_dttm across hids.
+            fp = sub["first_prone_dttm"]
+            if fp.notna().any():
+                first_session_h = float(sub.loc[fp.idxmin(), "first_session_duration_hours"])
+            else:
+                first_session_h = np.nan
             rec = {
                 "position_data_present": bool(sub["position_data_present"].any()),
                 "any_prone": bool(sub["any_prone"].any()),
@@ -118,6 +177,7 @@ def aggregate_observation_to_eligible(
                 "n_sessions": int(sub["n_sessions"].sum()),
                 "total_prone_hours": float(sub["total_prone_hours"].sum()),
                 "longest_session_hours": float(sub["longest_session_hours"].max()),
+                "first_session_duration_hours": first_session_h,
                 "first_prone_dttm": sub["first_prone_dttm"].min(),
             }
         else:
@@ -128,6 +188,7 @@ def aggregate_observation_to_eligible(
                 "n_sessions": 0,
                 "total_prone_hours": 0.0,
                 "longest_session_hours": 0.0,
+                "first_session_duration_hours": np.nan,
                 "first_prone_dttm": pd.NaT,
             }
         rec["encounter_block"] = row["encounter_block"]
@@ -136,9 +197,11 @@ def aggregate_observation_to_eligible(
     return pd.DataFrame.from_records(records)
 
 
-def build_patient_level(cohort: pd.DataFrame, elig: pd.DataFrame, obs: pd.DataFrame) -> pd.DataFrame:
+def build_patient_level(cohort: pd.DataFrame, elig: pd.DataFrame, obs: pd.DataFrame,
+                        t0t: pd.DataFrame | None = None) -> pd.DataFrame:
     """One row per PROSEVA-eligible patient: demographics + T0 physiology +
-    T_eligible + aggregated proning observation + time-to-prone."""
+    T0 treatments (vaso/NMB/Vt) + T_eligible + aggregated proning observation +
+    time-to-prone + first-session duration."""
     eligible = elig[elig["eligible"]].copy()
 
     cohort_cols = [
@@ -150,14 +213,41 @@ def build_patient_level(cohort: pd.DataFrame, elig: pd.DataFrame, obs: pd.DataFr
     merged = eligible.merge(cohort[cohort_cols], on="encounter_block", how="left",
                             suffixes=("", "_cohort"))
 
+    # T0 treatment characteristics (02b). Merge on an integer-canonical key so the
+    # float64 (cohort) vs int (02b) encounter_block representations match (lessons.md
+    # dtype-join trap); encounter_block itself is left untouched for downstream stages.
+    if t0t is not None and not t0t.empty:
+        t0t = t0t.copy()
+        def _blk(s):
+            s = pd.to_numeric(s, errors="coerce")
+            return s.astype("Int64").astype(str).where(s.notna())
+        merged["__blk"] = _blk(merged["encounter_block"])
+        t0t["__blk"] = _blk(t0t["encounter_block"])
+        treat_cols = [c for c in (
+            "on_vasopressor_at_t0", "on_nmb_at_t0", "vt_set_at_t0",
+            "on_vasopressor_at_te", "on_nmb_at_te", "vt_set_at_te") if c in t0t.columns]
+        merged = merged.merge(t0t[["__blk"] + treat_cols], on="__blk", how="left").drop(columns="__blk")
+    for c, default in [("on_vasopressor_at_t0", False), ("on_nmb_at_t0", False), ("vt_set_at_t0", np.nan),
+                       ("on_vasopressor_at_te", False), ("on_nmb_at_te", False), ("vt_set_at_te", np.nan)]:
+        if c not in merged.columns:
+            merged[c] = default
+    for c in ("on_vasopressor_at_t0", "on_nmb_at_t0", "on_vasopressor_at_te", "on_nmb_at_te"):
+        merged[c] = merged[c].fillna(False).astype(bool)
+
     agg = aggregate_observation_to_eligible(merged, obs)
     merged = merged.merge(agg, on="encounter_block", how="left")
 
-    # Time from clinical decision-point (T_eligible) to first prone session.
+    # Time from clinical decision-point (T_eligible) to first prone session — the main signal.
     # Negative = proned during the 12h stabilization window (before formal T_eligible).
     dt = (merged["first_prone_dttm"] - merged["T_eligible"])
     merged["time_to_prone_hours"] = dt.dt.total_seconds() / 3600.0
     merged.loc[~merged["any_prone"], "time_to_prone_hours"] = np.nan
+
+    # Secondary clock: time from ARDS onset (T₀) to first prone. Distinguishes very-early
+    # proning (small) from late rescue proning for refractory hypoxemia (large); generally ≥0.
+    dt0 = (merged["first_prone_dttm"] - merged["T0"])
+    merged["time_to_prone_from_t0_hours"] = dt0.dt.total_seconds() / 3600.0
+    merged.loc[~merged["any_prone"], "time_to_prone_from_t0_hours"] = np.nan
 
     # In-hospital mortality (Table 1 only; case-insensitive "Expired").
     merged["in_hospital_mortality"] = (
@@ -165,6 +255,48 @@ def build_patient_level(cohort: pd.DataFrame, elig: pd.DataFrame, obs: pd.DataFr
     )
 
     return merged
+
+
+def attach_imv_prone(pl: pd.DataFrame, sessions: pd.DataFrame, cohort_mod, tz: str) -> pd.DataFrame:
+    """Scope the proning TIMELINE to the invasively-ventilated ARDS episode.
+
+    The first prone for the time-to-prone clocks (and the first-session duration) is the first
+    prone session starting at/after T₀. Prone sessions before T₀ are awake / pre-intubation
+    proning (COVID-era HFNC/NIV proning of severely hypoxemic patients who were intubated later) —
+    real proning, but it cannot anchor to an IMV-based onset, so it is FLAGGED (`awake_proned`) and
+    excluded from the clocks. `any_prone` ("ever proned", the headline) is unchanged."""
+    pl = pl.copy()
+    s = sessions.copy()
+    s["hospitalization_id"] = s["hospitalization_id"].astype(str)
+    s["session_start_dttm"] = cohort_mod._coerce_dttm(s["session_start_dttm"], tz)
+    s["duration_hours"] = pd.to_numeric(s["duration_hours"], errors="coerce")
+    by_hid = {h: g for h, g in s.dropna(subset=["session_start_dttm"]).groupby("hospitalization_id", sort=False)}
+
+    t0v = cohort_mod._coerce_dttm(pl["T0"], tz)
+    any_imv, awake, fpd, fdur = [], [], [], []
+    for (_, row), t0 in zip(pl.iterrows(), t0v):
+        hids = _hids_for_block(row)
+        subs = [by_hid[h] for h in hids if h in by_hid]
+        ai, aw, fp, fd = False, False, pd.NaT, np.nan
+        if subs and pd.notna(t0):
+            alls = pd.concat(subs)
+            starts = alls["session_start_dttm"]
+            aw = bool((starts < t0).any())
+            imv = alls[starts >= t0]
+            if len(imv):
+                j = imv["session_start_dttm"].idxmin()
+                ai, fp, fd = True, imv.loc[j, "session_start_dttm"], float(imv.loc[j, "duration_hours"])
+        any_imv.append(ai); awake.append(aw); fpd.append(fp); fdur.append(fd)
+
+    pl["any_imv_prone"] = any_imv
+    pl["awake_proned"] = awake
+    pl["first_imv_prone_dttm"] = cohort_mod._coerce_dttm(pd.Series(fpd, index=pl.index), tz)
+    pl["first_session_duration_hours"] = fdur            # override: IMV-era first session
+    te = cohort_mod._coerce_dttm(pl["T_eligible"], tz)
+    pl["time_to_prone_hours"] = (pl["first_imv_prone_dttm"] - te).dt.total_seconds() / 3600.0
+    pl["time_to_prone_from_t0_hours"] = (pl["first_imv_prone_dttm"] - t0v).dt.total_seconds() / 3600.0
+    pl.loc[~pl["any_imv_prone"], ["time_to_prone_hours", "time_to_prone_from_t0_hours"]] = np.nan
+    return pl
 
 
 # ---------------------------------------------------------------------------
@@ -233,15 +365,30 @@ def attach_unit_and_periods(pl: pd.DataFrame, cohort_mod, tz: str) -> pd.DataFra
 
 def _slice_metrics(g: pd.DataFrame) -> dict:
     """The bounded-denominator metric bundle for one slice of eligible patients."""
-    ttp = g.loc[g["any_prone"], "time_to_prone_hours"].dropna()
+    # Timeline metrics are over the IMV-era proned (first prone ≥ T₀); awake/pre-intubation
+    # prones are excluded from timing and counted separately (n_awake_proned).
+    imv = g["any_imv_prone"] if "any_imv_prone" in g.columns else g["any_prone"]
+    ttp = g.loc[imv, "time_to_prone_hours"].dropna()
+    ttp0 = g.loc[imv, "time_to_prone_from_t0_hours"].dropna() \
+        if "time_to_prone_from_t0_hours" in g.columns else pd.Series(dtype="float64")
+    fsd = g.loc[imv, "first_session_duration_hours"].dropna() \
+        if "first_session_duration_hours" in g.columns else pd.Series(dtype="float64")
     return {
         "n_eligible": int(len(g)),
         "n_ever_proned": int(g["any_prone"].sum()),
+        "n_imv_proned": int(imv.sum()),
+        "n_awake_proned": int(g["awake_proned"].sum()) if "awake_proned" in g.columns else 0,
         "n_adherent": int(g["any_adherent"].sum()),
         "n_documented": int(g["position_data_present"].sum()),
         "ttp_median_h": float(ttp.median()) if not ttp.empty else None,
         "ttp_q1_h": float(ttp.quantile(0.25)) if not ttp.empty else None,
         "ttp_q3_h": float(ttp.quantile(0.75)) if not ttp.empty else None,
+        "ttp0_median_h": float(ttp0.median()) if not ttp0.empty else None,
+        "ttp0_q1_h": float(ttp0.quantile(0.25)) if not ttp0.empty else None,
+        "ttp0_q3_h": float(ttp0.quantile(0.75)) if not ttp0.empty else None,
+        "fsd_median_h": float(fsd.median()) if not fsd.empty else None,
+        "fsd_q1_h": float(fsd.quantile(0.25)) if not fsd.empty else None,
+        "fsd_q3_h": float(fsd.quantile(0.75)) if not fsd.empty else None,
     }
 
 
@@ -274,7 +421,10 @@ def build_slice_cells(pl: pd.DataFrame) -> pd.DataFrame:
                     emit(uname, gran, str(period), g, dim="name", parent=parent)
 
     cols = ["unit", "dim", "parent", "granularity", "period", "n_eligible", "n_ever_proned",
-            "n_adherent", "n_documented", "ttp_median_h", "ttp_q1_h", "ttp_q3_h"]
+            "n_imv_proned", "n_awake_proned",
+            "n_adherent", "n_documented", "ttp_median_h", "ttp_q1_h", "ttp_q3_h",
+            "ttp0_median_h", "ttp0_q1_h", "ttp0_q3_h",
+            "fsd_median_h", "fsd_q1_h", "fsd_q3_h"]
     df = pd.DataFrame(rows)[cols]
     df["rate_ever_proned"] = df["n_ever_proned"] / df["n_eligible"]
     df["rate_adherent_all"] = df["n_adherent"] / df["n_eligible"]
@@ -303,6 +453,167 @@ def _rate(num: int, den: int):
     return (num / den) if den else None
 
 
+# ---------------------------------------------------------------------------
+# Dashboard payload — per-slice distributions + reactive Table 1 (PHI-free)
+# ---------------------------------------------------------------------------
+def _q(s: pd.Series, q: float):
+    s = pd.to_numeric(s, errors="coerce").dropna()
+    return round(float(s.quantile(q)), 1) if not s.empty else None
+
+
+def _hist_counts(s: pd.Series, edges: list) -> list:
+    """Counts per bin [edges[i], edges[i+1]); final bin is [edges[-1], inf)."""
+    s = pd.to_numeric(s, errors="coerce").dropna()
+    out = []
+    for i, lo in enumerate(edges):
+        hi = edges[i + 1] if i + 1 < len(edges) else float("inf")
+        out.append(int(((s >= lo) & (s < hi)).sum()))
+    return out
+
+
+def _medtriple(s: pd.Series):
+    s = pd.to_numeric(s, errors="coerce").dropna()
+    if s.empty:
+        return None
+    return [round(float(s.median()), 1), round(float(s.quantile(.25)), 1),
+            round(float(s.quantile(.75)), 1)]
+
+
+def _display(col: str, val) -> str:
+    if pd.isna(val):
+        return "Unknown"
+    raw = str(val)
+    return CATEGORICAL_DISPLAY.get(col, {}).get(raw.lower(), raw if raw else "Unknown")
+
+
+def _dist_cell(g: pd.DataFrame) -> dict:
+    proned = g[g["any_imv_prone"]] if "any_imv_prone" in g.columns else g[g["any_prone"]]
+    fsd = proned["first_session_duration_hours"].dropna()
+    ttp = proned["time_to_prone_hours"].dropna()              # from T_eligible
+    ttp0 = proned["time_to_prone_from_t0_hours"].dropna()      # from T₀ (ARDS onset)
+    # Median T₀→T_eligible offset (hours) over all eligible in the slice — positions the
+    # dotted "T_eligible" reference line on the T₀ x-axis.
+    te_off = (g["T_eligible"] - g["T0"]).dt.total_seconds() / 3600.0
+    return {
+        "den": int(len(g)),
+        "n_proned": int(len(proned)),                         # IMV-era proned (timeline cohort)
+        "n_ever_proned": int(g["any_prone"].sum()),
+        "n_awake": int(g["awake_proned"].sum()) if "awake_proned" in g.columns else 0,
+        "n_fsd": int(len(fsd)),
+        "fsd_hist": _hist_counts(fsd, FSD_BIN_EDGES),
+        "fsd_med": _q(fsd, 0.5), "fsd_q1": _q(fsd, 0.25), "fsd_q3": _q(fsd, 0.75),
+        "fsd_p10": _q(fsd, 0.10), "fsd_p90": _q(fsd, 0.90),
+        # Both graphs plot cumulative proned by hour since T₀ (left ÷ eligible, right ÷ proned).
+        "ttp0_cum": [int((ttp0 <= h).sum()) for h in TTP_GRID_H],
+        "ttp_med": _q(ttp, 0.5), "ttp_q1": _q(ttp, 0.25), "ttp_q3": _q(ttp, 0.75),     # from T_eligible (note)
+        "ttp0_med": _q(ttp0, 0.5), "ttp0_q1": _q(ttp0, 0.25), "ttp0_q3": _q(ttp0, 0.75),  # from T₀ (note)
+        "te_off_med": _q(te_off, 0.5),   # median T₀→T_eligible offset → dotted reference line on the T₀ axis
+    }
+
+
+def _table1_cell(g: pd.DataFrame) -> dict:
+    """Structured Table-1 components for one slice (proned vs not-proned).
+    Numbers + p-values only — rendered to HTML in 05 (seed) and in JS (reactive)."""
+    import warnings
+    from scipy import stats
+
+    pr, no = g[g["any_prone"]], g[~g["any_prone"]]
+    n_all, n_pr, n_no = len(g), len(pr), len(no)
+
+    def _finite(v):
+        return float(v) if v is not None and np.isfinite(v) else None
+
+    def p_cont(col):
+        a = pd.to_numeric(pr[col], errors="coerce").dropna()
+        b = pd.to_numeric(no[col], errors="coerce").dropna()
+        if not (len(a) and len(b)):
+            return None
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                return _finite(stats.kruskal(a, b).pvalue)
+        except ValueError:
+            return None
+
+    def p_table(ct):
+        if not (ct.shape[1] >= 1 and ct.sum()):
+            return None
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                return _finite(stats.chi2_contingency(ct)[1])
+        except ValueError:
+            return None
+
+    rows = []
+    for kind, label, col in TABLE1_SPEC:
+        if kind == "cont":
+            rows.append({"kind": "cont", "label": label,
+                         "all": _medtriple(g[col]), "proned": _medtriple(pr[col]),
+                         "not": _medtriple(no[col]), "p": p_cont(col)})
+        elif kind == "bin":
+            a, b = pr[col].astype(bool), no[col].astype(bool)
+            ct = np.array([[a.sum(), (~a).sum()], [b.sum(), (~b).sum()]])
+            rows.append({"kind": "bin", "label": label,
+                         "all": [int(g[col].astype(bool).sum()), n_all],
+                         "proned": [int(a.sum()), n_pr], "not": [int(b.sum()), n_no],
+                         "p": p_table(ct)})
+        else:  # categorical
+            d_all = g[col].map(lambda v: _display(col, v))
+            d_pr = pr[col].map(lambda v: _display(col, v))
+            d_no = no[col].map(lambda v: _display(col, v))
+            levels = sorted(d_all.dropna().unique())
+            ct = np.array([[int((d_pr == lv).sum()) for lv in levels],
+                           [int((d_no == lv).sum()) for lv in levels]])
+            rows.append({
+                "kind": "cat", "label": label, "p": p_table(ct),
+                "levels": [{"label": lv,
+                            "all": [int((d_all == lv).sum()), n_all],
+                            "proned": [int((d_pr == lv).sum()), n_pr],
+                            "not": [int((d_no == lv).sum()), n_no]} for lv in levels],
+            })
+    return {"n_all": n_all, "n_proned": n_pr, "n_not": n_no, "rows": rows}
+
+
+def build_dashboard_payload(pl: pd.DataFrame) -> dict:
+    """Per-slice distributions (first-session duration histogram + time-to-prone
+    cumulative incidence) and reactive Table-1 components, nested
+    [dim?][unit][granularity][period]. Limited to DIST_GRANS (all/year/month) and
+    both grouping dims; weekly is too sparse for these panels."""
+    dist: dict = {}
+    table1: dict = {}
+
+    def emit(unit, gran, period, g):
+        dist.setdefault(unit, {}).setdefault(gran, {})[period] = _dist_cell(g)
+        table1.setdefault(unit, {}).setdefault(gran, {})[period] = _table1_cell(g)
+
+    # Type dimension (location_type) — incl. __ALL__.
+    for unit, gu in [("__ALL__", pl)] + list(pl.groupby("unit", observed=True)):
+        emit(unit, "all", "all", gu)
+        for gran, col in GRANULARITY_COL.items():
+            if gran not in DIST_GRANS:
+                continue
+            for period, g in gu.groupby(col, observed=True):
+                emit(unit, gran, str(period), g)
+
+    # Specific-unit dimension (location_name) — nested within type, no __ALL__.
+    if "unit_name" in pl.columns:
+        for uname, gun in pl.groupby("unit_name", observed=True):
+            emit(uname, "all", "all", gun)
+            for gran, col in GRANULARITY_COL.items():
+                if gran not in DIST_GRANS:
+                    continue
+                for period, g in gun.groupby(col, observed=True):
+                    emit(uname, gran, str(period), g)
+
+    return {
+        "fsd_bin_labels": FSD_BIN_LABELS,
+        "ttp_grid_h": TTP_GRID_H,
+        "dist": dist,
+        "table1": table1,
+    }
+
+
 def build_summary_rows(site: str, cfg: dict, m: dict) -> pd.DataFrame:
     """Tidy, federation-shareable summary — counts + rates only, no row-level data."""
     rows = [
@@ -312,7 +623,13 @@ def build_summary_rows(site: str, cfg: dict, m: dict) -> pd.DataFrame:
          _rate(m["n_eligible"], m["n_ards"]), "QI denominator"),
         ("ever_proned", "Ever proned / eligible (process rate; TILE HEADLINE)",
          m["n_ever_proned"], m["n_eligible"], _rate(m["n_ever_proned"], m["n_eligible"]),
-         "any documented prone session"),
+         "any documented prone session (incl. awake/pre-intubation)"),
+        ("imv_era_proned", "IMV-era proned / eligible (first prone ≥ T₀; timeline cohort)",
+         m["n_imv_proned"], m["n_eligible"], _rate(m["n_imv_proned"], m["n_eligible"]),
+         "time-to-prone / duration computed over these"),
+        ("awake_proned", "Awake / pre-intubation proned (first prone < T₀)",
+         m["n_awake_proned"], m["n_ever_proned"], _rate(m["n_awake_proned"], m["n_ever_proned"]),
+         "proned before intubation (mostly COVID-era); excluded from the time-to-prone clocks"),
         ("adherent_all_eligible", "Adherent ≥16h / ALL eligible (lower bound)",
          m["n_adherent"], m["n_eligible"], _rate(m["n_adherent"], m["n_eligible"]),
          "no-position-data imputed not-adherent"),
@@ -322,10 +639,14 @@ def build_summary_rows(site: str, cfg: dict, m: dict) -> pd.DataFrame:
         ("adherent_documented", "Adherent ≥16h / documented subset (upper bound)",
          m["n_adherent"], m["n_documented"], _rate(m["n_adherent"], m["n_documented"]),
          "charted-only; excludes 81% of eligible"),
-        ("time_to_prone_median_h", "Median hours T_eligible→first prone (proned only)",
-         None, None, m["ttp_median_h"], "IQR in q1/q3 rows below"),
+        ("time_to_prone_median_h", "Median hours T_eligible→first IMV-era prone (MAIN)",
+         None, None, m["ttp_median_h"], "IMV-era proned only; negative = proned T₀..T_eligible (early)"),
         ("time_to_prone_q1_h", "Q1 hours T_eligible→first prone", None, None, m["ttp_q1_h"], ""),
         ("time_to_prone_q3_h", "Q3 hours T_eligible→first prone", None, None, m["ttp_q3_h"], ""),
+        ("time_to_prone_from_t0_median_h", "Median hours T₀(ARDS onset)→first prone (proned only)",
+         None, None, m["ttp0_median_h"], "small = early/proactive; large = late rescue for hypoxemia"),
+        ("time_to_prone_from_t0_q1_h", "Q1 hours T₀→first prone", None, None, m["ttp0_q1_h"], ""),
+        ("time_to_prone_from_t0_q3_h", "Q3 hours T₀→first prone", None, None, m["ttp0_q3_h"], ""),
     ]
     for h in CDF_HORIZONS_H:
         c = m["cdf"][h]
@@ -340,11 +661,28 @@ def build_summary_rows(site: str, cfg: dict, m: dict) -> pd.DataFrame:
     return df
 
 
+def _tile_note(m: dict) -> str:
+    """Tile note: position-table coverage caveat + median first-prone-session duration."""
+    dur = ""
+    if m.get("fsd_median_h") is not None:
+        dur = (f" Median first prone session {m['fsd_median_h']:.0f} h "
+               f"(IQR {m['fsd_q1_h']:.0f}–{m['fsd_q3_h']:.0f} h), among IMV-era proned.")
+    awake = ""
+    if m.get("n_awake_proned"):
+        awake = (f" {m['n_awake_proned']} were awake/pre-intubation proned (proned < T₀, "
+                 "mostly COVID-era), excluded from timing.")
+    return ("Position table at this site charts only proning episodes; "
+            f"only {m['n_documented']}/{m['n_eligible']} eligible have any position "
+            "record, so ever-proned is a process floor." + dur + awake)
+
+
 def build_tile_feed(cfg: dict, m: dict, slices: pd.DataFrame) -> dict:
     """tile_feed_proning.json conforming to lpv/plans/02_scorecard_tile_contract.md §3.
 
     Headline donut = ever-proned / all eligible (process rate).
-    Segments      = adherent / all eligible (lower bound) and adherent / charted (upper bound).
+    Segments      = none (the "Adherent ≥16h" bounds were retired 2026-06-24 — the
+                    drill-down now describes prone duration as a distribution instead;
+                    median first-session duration is surfaced in the tile note).
     Grain         = per-unit + monthly (units = __ALL__ + canonical ICU slugs present;
                     periods = ["all","month"]). Week/year stay dashboard-only (week is too
                     sparse for the contract; "year" is not a contract period key). A cell is
@@ -397,9 +735,7 @@ def build_tile_feed(cfg: dict, m: dict, slices: pd.DataFrame) -> dict:
         "detail_href": "proning_dashboard.html",
         "goal": None,
         "generated": m["generated"],
-        "note": ("Position table at this site charts only proning episodes; "
-                 f"only {m['n_documented']}/{m['n_eligible']} eligible have any "
-                 "position record. Adherence shown as a bound (all-eligible vs charted)."),
+        "note": _tile_note(m),
         "grain": {"units": units, "periods": ["all", "month"]},
         # Two ICU-grouping dimensions: `type` = location_type (back-compat, also grain.units);
         # `name` = specific unit (location_name). Both key into headline/segment cells; `parent`
@@ -413,12 +749,7 @@ def build_tile_feed(cfg: dict, m: dict, slices: pd.DataFrame) -> dict:
             "n_unit": "patients",
             "cells": cells("n_ever_proned", "n_eligible"),
         },
-        "segments": [
-            {"key": "adherent_all", "label": "Adherent ≥16h",
-             "cells": cells("n_adherent", "n_eligible")},
-            {"key": "adherent_charted", "label": "Adherent (charted)",
-             "cells": cells("n_adherent", "n_documented")},
-        ],
+        "segments": [],
     }
 
 
@@ -480,38 +811,63 @@ def main() -> None:
     cohort = pd.read_parquet(inter / "cohort.parquet")
     elig = pd.read_parquet(inter / "proning_eligibility.parquet")
     obs = pd.read_parquet(inter / "proning_observation.parquet")
+    t0t_path = inter / "t0_treatments.parquet"
+    if t0t_path.exists():
+        t0t = pd.read_parquet(t0t_path)
+    else:
+        t0t = None
+        log.warning("t0_treatments.parquet missing — run code/02b_t0_treatments.py; "
+                    "Table-1 vaso/NMB/Vt rows will be empty")
 
-    pl = build_patient_level(cohort, elig, obs)
+    pl = build_patient_level(cohort, elig, obs, t0t)
+    sessions = pd.read_parquet(inter / "prone_sessions.parquet")
+    pl = attach_imv_prone(pl, sessions, cohort_mod, tz)   # IMV-era timeline + awake-proned flag
     pl = attach_unit_and_periods(pl, cohort_mod, tz)
 
     # ---- headline counts -------------------------------------------------
     n_ards = int(cohort["patient_id"].nunique())
     n_eligible = len(pl)
-    n_ever_proned = int(pl["any_prone"].sum())
+    n_ever_proned = int(pl["any_prone"].sum())          # headline (incl. awake/pre-intubation)
+    n_imv_proned = int(pl["any_imv_prone"].sum())       # timeline cohort (first prone ≥ T₀)
+    n_awake = int(pl["awake_proned"].sum())             # proned before intubation (excluded from clocks)
     n_adherent = int(pl["any_adherent"].sum())
     n_documented = int(pl["position_data_present"].sum())
 
-    # Sanity: at UChicago every documented-eligible patient was proned.
-    if n_documented != n_ever_proned:
-        log.warning("documented (%d) != ever-proned (%d) — position rows without a "
-                    "prone session exist; 'adherent/charted' denominator uses documented.",
-                    n_documented, n_ever_proned)
-
-    ttp = pl.loc[pl["any_prone"], "time_to_prone_hours"].dropna()
+    # Timeline metrics use the IMV-era proned; awake/pre-intubation prones are flagged separately.
+    ttp = pl.loc[pl["any_imv_prone"], "time_to_prone_hours"].dropna()
     ttp_median = float(ttp.median()) if not ttp.empty else None
     ttp_q1 = float(ttp.quantile(0.25)) if not ttp.empty else None
     ttp_q3 = float(ttp.quantile(0.75)) if not ttp.empty else None
     cdf = compute_cdf(pl["time_to_prone_hours"], n_eligible, CDF_HORIZONS_H)
+
+    ttp0 = pl.loc[pl["any_imv_prone"], "time_to_prone_from_t0_hours"].dropna()
+    ttp0_median = float(ttp0.median()) if not ttp0.empty else None
+    ttp0_q1 = float(ttp0.quantile(0.25)) if not ttp0.empty else None
+    ttp0_q3 = float(ttp0.quantile(0.75)) if not ttp0.empty else None
+
+    fsd = pl.loc[pl["any_imv_prone"], "first_session_duration_hours"].dropna()
+    fsd_median = float(fsd.median()) if not fsd.empty else None
+    fsd_q1 = float(fsd.quantile(0.25)) if not fsd.empty else None
+    fsd_q3 = float(fsd.quantile(0.75)) if not fsd.empty else None
+
+    n_vaso_t0 = int(pl["on_vasopressor_at_t0"].sum())
+    n_nmb_t0 = int(pl["on_nmb_at_t0"].sum())
+    n_vt_t0 = int(pl["vt_set_at_t0"].notna().sum())
 
     import datetime as _dt
     generated = _dt.datetime.now().isoformat(timespec="minutes")
 
     m = {
         "n_ards": n_ards, "n_eligible": n_eligible, "n_ever_proned": n_ever_proned,
+        "n_imv_proned": n_imv_proned, "n_awake_proned": n_awake,
         "n_adherent": n_adherent, "n_documented": n_documented,
         "ttp_median_h": ttp_median, "ttp_q1_h": ttp_q1, "ttp_q3_h": ttp_q3,
+        "ttp0_median_h": ttp0_median, "ttp0_q1_h": ttp0_q1, "ttp0_q3_h": ttp0_q3,
+        "fsd_median_h": fsd_median, "fsd_q1_h": fsd_q1, "fsd_q3_h": fsd_q3,
         "cdf": cdf, "generated": generated,
     }
+    log.info("proned: ever %d | IMV-era (≥T₀, timeline) %d | awake/pre-intubation %d",
+             n_ever_proned, n_imv_proned, n_awake)
 
     # ---- sliced metrics (unit x granularity x period) --------------------
     slices = build_slice_cells(pl)
@@ -544,6 +900,23 @@ def main() -> None:
     with open(feed_path, "w") as f:
         json.dump(feed, f, indent=2, ensure_ascii=False)
 
+    # ---- dashboard payload (distributions + reactive Table 1) -------------
+    payload = build_dashboard_payload(pl)
+    # Reconcile: all-unit/all-time Table-1 group sizes must equal the headline counts.
+    t1_all = payload["table1"]["__ALL__"]["all"]["all"]
+    if not (t1_all["n_all"] == n_eligible and t1_all["n_proned"] == n_ever_proned
+            and t1_all["n_all"] - t1_all["n_proned"] == t1_all["n_not"]):
+        raise RuntimeError(
+            f"Table-1 __ALL__/all counts {t1_all['n_all']}/{t1_all['n_proned']}/{t1_all['n_not']} "
+            f"!= headline eligible/proned {n_eligible}/{n_ever_proned}")
+    # And the duration histogram over proned sums to the count with a charted first-session duration.
+    d_all = payload["dist"]["__ALL__"]["all"]["all"]
+    if sum(d_all["fsd_hist"]) != d_all["n_fsd"]:
+        raise RuntimeError("first-session-duration histogram does not sum to n_fsd")
+    payload_path = inter / "dashboard_payload.json"
+    with open(payload_path, "w") as f:
+        json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+
     # ---- log summary -----------------------------------------------------
     log.info("ARDS cohort:               %5d patients", n_ards)
     log.info("PROSEVA-eligible:          %5d (%.1f%% of ARDS)", n_eligible, 100 * _rate(n_eligible, n_ards))
@@ -552,8 +925,17 @@ def main() -> None:
     log.info("position data present:     %5d (%.1f%%)  [documented subset]", n_documented, 100 * _rate(n_documented, n_eligible))
     log.info("adherent / documented:     %5d (%.1f%%)  [upper bound]", n_adherent, 100 * _rate(n_adherent, n_documented))
     if ttp_median is not None:
-        log.info("time to first prone (h):   median %.1f (IQR %.1f–%.1f), among %d proned",
+        log.info("time to prone from T_elig:  median %.1f (IQR %.1f–%.1f), among %d proned [main]",
                  ttp_median, ttp_q1, ttp_q3, len(ttp))
+    if ttp0_median is not None:
+        log.info("time to prone from T₀:      median %.1f (IQR %.1f–%.1f), among %d proned",
+                 ttp0_median, ttp0_q1, ttp0_q3, len(ttp0))
+    if fsd_median is not None:
+        log.info("first prone session (h):   median %.1f (IQR %.1f–%.1f), among %d proned",
+                 fsd_median, fsd_q1, fsd_q3, len(fsd))
+    log.info("at T₀: on vasopressor %d (%.1f%%); on NMB %d (%.1f%%); set Vt charted %d (%.1f%%)",
+             n_vaso_t0, 100 * _rate(n_vaso_t0, n_eligible), n_nmb_t0,
+             100 * _rate(n_nmb_t0, n_eligible), n_vt_t0, 100 * _rate(n_vt_t0, n_eligible))
     for h in CDF_HORIZONS_H:
         c = cdf[h]
         log.info("  cumulative proned ≤%3dh:  %5d (%.1f%%)", h, c["num"], 100 * c["rate"])
@@ -563,6 +945,9 @@ def main() -> None:
     log.info("wrote: %s", slices_csv.relative_to(PROJECT_ROOT))
     log.info("wrote: %s  (PHI-free check passed; grain units=%d periods=all,month)",
              feed_path.relative_to(PROJECT_ROOT), len(feed["grain"]["units"]))
+    log.info("wrote: %s (%.0f KB; dist+table1 over %s)",
+             payload_path.relative_to(PROJECT_ROOT), payload_path.stat().st_size / 1024,
+             ",".join(DIST_GRANS))
 
 
 if __name__ == "__main__":

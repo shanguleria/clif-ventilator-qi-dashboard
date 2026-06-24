@@ -126,6 +126,11 @@ def compute_eligibility(
             "T_first_qualifying_abg": pd.NaT,
             "T_eligible": pd.NaT,
             "n_qualifying_abgs_in_window": 0,
+            # Physiology at the confirming (post-stabilization) qualifying ABG — the
+            # "at T_eligible" severity, for the Table-1 T₀-vs-T_eligible comparison.
+            "pf_at_te": np.nan,
+            "fio2_at_te": np.nan,
+            "peep_at_te": np.nan,
             "ineligibility_reason": None,
         }
 
@@ -180,10 +185,18 @@ def compute_eligibility(
 
         n_qualifying_in_window = int(((times >= t_first) & (times <= t_eligible_target) & pd.Series(meets)).sum())
 
+        # Confirming ABG = first qualifying ABG at/after the stabilization window end;
+        # its physiology is the "at T_eligible" severity for the Table-1 comparison.
+        conf_idx = int(post_window_qualifying.to_numpy().argmax())
+        conf = g.reset_index(drop=True).iloc[conf_idx]
+
         result["eligible"] = True
         result["T_first_qualifying_abg"] = t_first
         result["T_eligible"] = t_eligible_target
         result["n_qualifying_abgs_in_window"] = n_qualifying_in_window
+        result["pf_at_te"] = float(conf["pf_ratio"])
+        result["fio2_at_te"] = float(conf["fio2_set"])
+        result["peep_at_te"] = float(conf["peep_set"])
         result["ineligibility_reason"] = None
         rows.append(result)
 
