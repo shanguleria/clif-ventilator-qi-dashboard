@@ -138,10 +138,11 @@ run_bundle.sh           # one-command build: LPV pipeline -> scorecard
 refresh_scorecard.sh    # fast scorecard-only rebuild (no CLIF re-read)
 CODEOWNERS              # per-metric ownership (stub; solo for now)
 contract/               # the tile-feed spec + JSON Schema (the only thing the scorecard depends on)
+docs/                   # living methods / data-dictionary reference (build_methods.py + index + scorecard doc)
 metrics/                # one folder per QI vertical (see metrics/README.md)
-  lpv/      code/ ...    #   the reference metric: 01_cohort -> 04_dashboard + 05_tile_feed
-  proning/  code/ ...
-  sat/      code/ ...
+  lpv/      code/ ... METHODS.md   # the reference metric: 01_cohort -> 04_dashboard + 05_tile_feed
+  proning/  code/ ... METHODS.md
+  sat/      code/ ... METHODS.md
 scorecard/              # build_scorecard.py — the combiner (collects feeds, renders scorecard.html)
 feeds/                  # collected PHI-free tile feeds (the per-site submission set; build artifact)
 output/dashboard/       # the shippable bundle: scorecard.html + each metric's drill-down (gitignored)
@@ -150,6 +151,11 @@ output/dashboard/       # the shippable bundle: scorecard.html + each metric's d
 Each metric emits `metrics/<id>/output/final/tile_feed_<id>.json` (+ its `<id>_dashboard.html`). The
 combiner collects every metric in `config.json → metrics`, stages feeds into `feeds/`, ships the
 drill-downs into `output/dashboard/`, and renders the scorecard.
+
+**Methods reference:** [`docs/README.md`](docs/README.md) is the living methods / data-dictionary index —
+one `metrics/<id>/METHODS.md` per tile plus a combiner doc. The specific thresholds, drug/mode lists, and
+provenance in each are machine-stamped from `config.json` + the tile feeds by `docs/build_methods.py`,
+which runs at the end of `run_bundle.sh` / `refresh_scorecard.sh`, so the docs never drift from the code.
 
 ## Pipeline (LPV metric + combiner)
 

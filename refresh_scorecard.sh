@@ -37,6 +37,8 @@ fi
 
 "$PY" metrics/lpv/code/05_tile_feed.py    # re-emit the LPV feed from current parquets (no CLIF read)
 "$PY" scorecard/build_scorecard.py        # collect every metric feed + rebuild scorecard.html
+"$PY" docs/build_methods.py               # refresh the living methods docs from feeds + config
 
 echo ""
 echo "Done. Open the QI scorecard:  output/dashboard/scorecard.html"
+echo "  Methods docs refreshed under docs/ (index) + metrics/<id>/METHODS.md"

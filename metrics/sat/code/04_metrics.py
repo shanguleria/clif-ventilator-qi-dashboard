@@ -30,6 +30,7 @@ import datetime as _dt
 import importlib.util
 import json
 import logging
+import subprocess
 import sys
 from pathlib import Path
 
@@ -50,6 +51,18 @@ CANONICAL_UNITS = [
 GRANULARITY_COL = {"month": "period_month", "week": "period_week"}
 TILE_SCHEMA_VERSION = 1
 PHI_FORBIDDEN = ("hospitalization_id", "patient_id")
+DEFINITION_VERSION = "sat-v1"   # bump ONLY when the eligibility / denominator definition changes
+
+
+def _git_sha():
+    """Short bundle commit for provenance (None outside a git checkout)."""
+    try:
+        out = subprocess.run(["git", "-C", str(Path(__file__).resolve().parents[3]),
+                              "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=5)
+        return out.stdout.strip() or None
+    except Exception:
+        return None
 
 
 def _load_cohort_module():
@@ -265,6 +278,14 @@ def build_tile_feed(cfg: dict, m: dict, slices: pd.DataFrame) -> dict:
             {"key": "extubated", "label": "Extubated same day", "color": "#8a1f2b",
              "cells": cells("n_extubated", "n_sat")},
         ],
+        # Provenance (pooling-ready; additive — the combiner ignores it, a coordinating center requires it).
+        "provenance": {
+            "site_id": cfg.get("site", "unknown"),
+            "code_version": _git_sha(),
+            "clif_version": cfg.get("clif_version") or (cfg.get("primary_dataset") or {}).get("clif_version"),
+            "definition_version": DEFINITION_VERSION,
+            "generated": m["generated"],
+        },
     }
 
 

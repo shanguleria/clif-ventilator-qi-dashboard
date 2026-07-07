@@ -45,6 +45,7 @@ steps=(
   "metrics/lpv/code/04_dashboard.py"
   "metrics/lpv/code/05_tile_feed.py"
   "scorecard/build_scorecard.py"
+  "docs/build_methods.py"
 )
 
 for step in "${steps[@]}"; do
