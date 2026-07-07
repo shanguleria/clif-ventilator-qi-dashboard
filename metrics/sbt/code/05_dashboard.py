@@ -1078,7 +1078,7 @@ def main() -> None:
              "yes" if logo_uri else "no", slices["unit"].nunique(), len(slices), small_cell_min)
     log.info("funnel: vent %d → non-trach %d → eligible %d → SBT %d", n_vent, n_nontrach, n_elig, n_sbt)
     log.info("Table 1 patients: %d", len(pt))
-    log.info("wrote: %s (%.0f KB)", out_path.relative_to(PROJECT_ROOT), out_path.stat().st_size / 1024)
+    log.info("wrote: %s (%.0f KB)", out_path.relative_to(PROJECT_ROOT.parents[1]), out_path.stat().st_size / 1024)
 
 
 if __name__ == "__main__":

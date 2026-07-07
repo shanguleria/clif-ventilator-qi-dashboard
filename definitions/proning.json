@@ -1,0 +1,46 @@
+{
+  "definition_version": "proning-v1",
+  "tables_in_use": [
+    "patient",
+    "hospitalization",
+    "adt",
+    "respiratory_support",
+    "labs",
+    "position",
+    "patient_assessments",
+    "medication_admin_continuous"
+  ],
+  "ards_cohort": {
+    "pf_max": 300,
+    "fio2_min": 0.4,
+    "peep_min": 5,
+    "use_sf_surrogate": false,
+    "sf_max": 315,
+    "spo2_max": 97
+  },
+  "proning_eligibility": {
+    "pf_max": 150,
+    "fio2_min": 0.6,
+    "peep_min": 5,
+    "sustained_hours": 12
+  },
+  "t0_treatments": {
+    "vasopressor_categories": [
+      "norepinephrine", "epinephrine", "phenylephrine",
+      "dopamine", "vasopressin", "angiotensin"
+    ],
+    "paralytic_categories": [
+      "cisatracurium", "rocuronium", "vecuronium", "atracurium", "pancuronium"
+    ],
+    "infusion_trailing_cap_hours": 24,
+    "vt_lookback_hours": 6
+  },
+  "proning_observation": {
+    "session_gap_minutes": 60,
+    "adherent_session_hours": 16
+  },
+  "reporting": {
+    "unit_attribution_anchor": "T_eligible",
+    "small_cell_min_den": 10
+  }
+}

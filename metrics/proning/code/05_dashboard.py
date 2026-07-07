@@ -814,7 +814,7 @@ def main() -> None:
              slices["unit"].nunique(), len(slices), small_cell_min)
     log.info("payload: dist+table1 over %d units (all/year/month); seed Table 1 rows: %d",
              len(payload["table1"]), len(t1_seed["rows"]))
-    log.info("wrote: %s (%.0f KB)", out_path.relative_to(PROJECT_ROOT), out_path.stat().st_size / 1024)
+    log.info("wrote: %s (%.0f KB)", out_path.relative_to(PROJECT_ROOT.parents[1]), out_path.stat().st_size / 1024)
 
 
 if __name__ == "__main__":

@@ -960,14 +960,14 @@ def main() -> None:
     for h in CDF_HORIZONS_H:
         c = cdf[h]
         log.info("  cumulative proned ≤%3dh:  %5d (%.1f%%)", h, c["num"], 100 * c["rate"])
-    log.info("wrote: %s", pl_path.relative_to(PROJECT_ROOT))
-    log.info("wrote: %s", summary_path.relative_to(PROJECT_ROOT))
-    log.info("wrote: %s (%d cells)", slices_pq.relative_to(PROJECT_ROOT), len(slices))
-    log.info("wrote: %s", slices_csv.relative_to(PROJECT_ROOT))
+    log.info("wrote: %s", pl_path.relative_to(PROJECT_ROOT.parents[1]))
+    log.info("wrote: %s", summary_path.relative_to(PROJECT_ROOT.parents[1]))
+    log.info("wrote: %s (%d cells)", slices_pq.relative_to(PROJECT_ROOT.parents[1]), len(slices))
+    log.info("wrote: %s", slices_csv.relative_to(PROJECT_ROOT.parents[1]))
     log.info("wrote: %s  (PHI-free check passed; grain units=%d periods=all,month)",
-             feed_path.relative_to(PROJECT_ROOT), len(feed["grain"]["units"]))
+             feed_path.relative_to(PROJECT_ROOT.parents[1]), len(feed["grain"]["units"]))
     log.info("wrote: %s (%.0f KB; dist+table1 over %s)",
-             payload_path.relative_to(PROJECT_ROOT), payload_path.stat().st_size / 1024,
+             payload_path.relative_to(PROJECT_ROOT.parents[1]), payload_path.stat().st_size / 1024,
              ",".join(DIST_GRANS))
 
 

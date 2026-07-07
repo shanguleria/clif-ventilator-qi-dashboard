@@ -42,10 +42,15 @@ import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]              # bundle root (scorecard/ is one level down)
-CFG = json.loads((ROOT / "config.json").read_text())
-SITE = CFG.get("site", "Your Site")
-DASH_DIR = ROOT / "output" / "dashboard"   # shared shippable bundle (scorecard + per-metric drill-downs)
-FEEDS_DIR = ROOT / "feeds"                 # PHI-free feed collection (the per-site consortium submission set)
+import sys as _sys
+if str(ROOT) not in _sys.path:
+    _sys.path.insert(0, str(ROOT))
+import bundle_config as _bc                              # multi-site config + output resolver
+_SITE_ID = _bc.active_site()                             # env CLIF_SITE (default uchicago)
+_PROFILE = _bc.load_profile(_SITE_ID)
+SITE = _PROFILE.get("site_id", "Your Site")
+DASH_DIR = _bc.dashboard_dir(_SITE_ID)     # output/<site>/dashboard — shippable bundle (scorecard + drill-downs)
+FEEDS_DIR = _bc.feeds_dir(_SITE_ID)        # output/<site>/feeds — PHI-free consortium submission set
 DASH_DIR.mkdir(parents=True, exist_ok=True)
 FEEDS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -66,7 +71,7 @@ UNIT_LABEL = {"__ALL__": "All ICUs", "medical_icu": "Medical ICU",
 # Which metrics to load, in slot order. Each is its OWN vertical that emits a v1 feed at
 # metrics/<id>/output/final/tile_feed_<id>.json (LPV included -- full symmetry). The combiner only
 # collects + renders; it computes nothing metric-specific itself.
-METRICS_ENABLED = CFG.get("metrics", TILE_ORDER)
+METRICS_ENABLED = _bc.enabled_metrics(_SITE_ID)
 
 # ----------------------------------------------------------------------------
 # 1. Collect each enabled metric's tile feed (stage feed -> feeds/, detail -> dashboard/)
@@ -99,7 +104,7 @@ def load_feed(fp):
 
 feeds = []
 for mid in METRICS_ENABLED:
-    fp = ROOT / "metrics" / mid / "output" / "final" / f"tile_feed_{mid}.json"
+    fp = _bc.metric_output_dir(mid, _SITE_ID) / "final" / f"tile_feed_{mid}.json"
     feed = load_feed(fp)
     if feed is None:
         print(f"  [skip] {mid}: no feed at {fp} -> placeholder")

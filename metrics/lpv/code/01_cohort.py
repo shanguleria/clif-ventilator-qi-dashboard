@@ -33,9 +33,13 @@ from clifpy.tables import Patient, Hospitalization, Adt, RespiratorySupport, Vit
 # Config
 # ----------------------------------------------------------------------------
 
-ROOT = Path(__file__).resolve().parents[3]            # bundle root (shared config.json)
+ROOT = Path(__file__).resolve().parents[3]            # bundle root (holds bundle_config.py)
 _METRIC_ROOT = Path(__file__).resolve().parents[1]    # metrics/lpv (per-metric outputs)
-CFG = json.loads((ROOT / "config.json").read_text())
+import sys as _sys
+if str(ROOT) not in _sys.path:
+    _sys.path.insert(0, str(ROOT))
+import bundle_config as _bc                            # multi-site config + output resolver
+CFG = _bc.effective("lpv")                             # site = env CLIF_SITE (default uchicago)
 DATA_DIR = CFG["clif_data_path"]
 FILETYPE = CFG.get("filetype", "parquet")
 TZ = CFG.get("timezone", "US/Central")
@@ -80,7 +84,7 @@ print(f"  adult hospitalizations: {len(adult_hosp):,}")
 print("[2] Loading respiratory_support (IMV only) ...")
 imv = RespiratorySupport.from_file(
     DATA_DIR, filetype=FILETYPE, timezone=TZ,
-    filters={"hospitalization_id": adult_ids, "device_category": ["IMV"]},
+    filters={"hospitalization_id": adult_ids, "device_category": ["IMV", "imv"]},  # accept either casing across sites
     columns=["hospitalization_id", "recorded_dttm", "device_category"],
 ).df
 imv["hospitalization_id"] = imv["hospitalization_id"].astype(str)

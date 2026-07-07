@@ -138,7 +138,7 @@ def probe_med_continuous(con, scan: str, summary: dict) -> dict:
     # Persist the inventory for config population.
     inv_path = FINAL_DIR / "probe_med_category_inventory.csv"
     vc.to_csv(inv_path, index=False)
-    log.info("wrote %s", inv_path.relative_to(PROJECT_ROOT))
+    log.info("wrote %s", inv_path.relative_to(PROJECT_ROOT.parents[1]))
 
     if unit_col:
         log.info("\n--- %s value_counts (top 40) ---", unit_col)
@@ -337,7 +337,7 @@ def main() -> None:
     out = pd.DataFrame([summary])
     out_path = FINAL_DIR / "probe_summary.csv"
     out.to_csv(out_path, index=False)
-    log.info("\nwrote %s", out_path.relative_to(PROJECT_ROOT))
+    log.info("\nwrote %s", out_path.relative_to(PROJECT_ROOT.parents[1]))
     log.info("PROBE COMPLETE — review the convention verdict + inventory before locking config.")
 
 

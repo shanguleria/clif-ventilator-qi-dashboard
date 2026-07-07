@@ -261,7 +261,7 @@ def main() -> None:
     log.info("ineligibility breakdown:")
     for reason, n in reason_counts.items():
         log.info("  %4d  %s", n, reason)
-    log.info("wrote: %s", out_path.relative_to(PROJECT_ROOT))
+    log.info("wrote: %s", out_path.relative_to(PROJECT_ROOT.parents[1]))
 
 
 if __name__ == "__main__":

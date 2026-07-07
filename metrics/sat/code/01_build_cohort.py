@@ -34,8 +34,14 @@ import pandas as pd
 import clifpy
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = PROJECT_ROOT / "config.json"
-OUTPUT_DIR = PROJECT_ROOT / "output"
+_BUNDLE_ROOT = Path(__file__).resolve().parents[3]        # repo root (holds bundle_config.py)
+import sys as _sys
+if str(_BUNDLE_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_BUNDLE_ROOT))
+import bundle_config as _bc                                # multi-site config + output resolver
+_METRIC, _SITE = "sat", _bc.active_site()
+CONFIG_PATH = PROJECT_ROOT / "config.json"                 # legacy path (load_config now uses bundle_config)
+OUTPUT_DIR = _bc.metric_output_dir(_METRIC, _SITE)         # output/<site>/metrics/sat
 INTERMEDIATE_DIR = OUTPUT_DIR / "intermediate"
 CACHE_DIR = INTERMEDIATE_DIR / "_cache"
 FINAL_DIR = OUTPUT_DIR / "final"
@@ -64,8 +70,7 @@ def cpath(name: str) -> Path:
 
 
 def load_config(path: Path = CONFIG_PATH) -> dict:
-    with path.open() as f:
-        return json.load(f)
+    return _bc.effective(_METRIC, _SITE)
 
 
 def build_orchestrator(cfg: dict) -> clifpy.ClifOrchestrator:

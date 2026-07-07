@@ -95,20 +95,21 @@ definition changes.
 | Field | Value |
 |---|---|
 | definition_version | proning-v1 |
-| code_version (git SHA) | 66fd93f |
+| code_version (git SHA) | 0d88d6a |
 | clif_version | 2.1.0 |
 | site_id | UChicago |
-| generated | 2026-07-07T14:01 |
+| generated | 2026-07-07T17:26 |
 
 **Grain published to the scorecard:**
 
 - Units (7): `__ALL__`, `medical_icu`, `mixed_cardiothoracic_icu`, `surgical_icu`, `mixed_neuro_icu`, `general_icu`, `burn_icu`
 - Periods: `all`, `month`
 
-**Definitional parameters** (from `metrics/proning/config/config.json`):
+**Definitional parameters** (from `definitions/proning.json`):
 
 | Parameter | Value |
 |---|---|
+| `definition_version` | proning-v1 |
 | `ards_cohort.pf_max` | 300 |
 | `ards_cohort.fio2_min` | 0.4 |
 | `ards_cohort.peep_min` | 5 |

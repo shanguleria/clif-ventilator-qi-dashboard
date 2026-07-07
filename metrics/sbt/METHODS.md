@@ -101,10 +101,10 @@ changes.
 | Field | Value |
 |---|---|
 | definition_version | sbt-v1 |
-| code_version (git SHA) | 59867c8 |
+| code_version (git SHA) | 0d88d6a |
 | clif_version | 2.1.0 |
 | site_id | UChicago |
-| generated | 2026-06-08T09:30 |
+| generated | 2026-07-07T17:24 |
 
 **Grain published to the scorecard:**
 
@@ -112,10 +112,11 @@ changes.
 - Periods: `all`, `month`, `week`
 - Segments: SBT, any length, On spont · elig, On spont · all-days
 
-**Definitional parameters** (from `metrics/sbt/config.json`):
+**Definitional parameters** (from `definitions/sbt.json`):
 
 | Parameter | Value |
 |---|---|
+| `definition_version` | sbt-v1 |
 | `sbt_modes.controlled_modes` | assist control-volume control, pressure control, pressure-regulated volume control, simv |
 | `sbt_modes.support_modes` | pressure support/cpap |
 | `sbt_eligibility.controlled_min_hours` | 12 |

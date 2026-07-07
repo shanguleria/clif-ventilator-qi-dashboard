@@ -1032,7 +1032,7 @@ def main() -> None:
              "yes" if logo_uri else "no", slices["unit"].nunique(), len(slices), small_cell_min)
     log.info("funnel: vent %d → eligible %d → SAT %d → resumed %d", n_vent, n_elig, n_sat, n_resumed)
     log.info("Kress drug-level resumptions: %d | Table 1 patients: %d", kress_n, len(pt))
-    log.info("wrote: %s (%.0f KB)", out_path.relative_to(PROJECT_ROOT), out_path.stat().st_size / 1024)
+    log.info("wrote: %s (%.0f KB)", out_path.relative_to(PROJECT_ROOT.parents[1]), out_path.stat().st_size / 1024)
 
 
 if __name__ == "__main__":

@@ -18,22 +18,33 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# Site selector: ./refresh_scorecard.sh [--site <id>] (default $CLIF_SITE or uchicago).
+SITE="${CLIF_SITE:-uchicago}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --site) SITE="$2"; shift 2;;
+    --site=*) SITE="${1#*=}"; shift;;
+    *) echo "unknown arg: $1"; echo "usage: ./refresh_scorecard.sh [--site <id>]"; exit 1;;
+  esac
+done
+export CLIF_SITE="$SITE"
+
 PY=".venv/bin/python"
 if [[ ! -x "$PY" ]]; then
   echo "ERROR: $PY not found. Create the venv first:"
   echo "    python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
   exit 1
 fi
-if [[ ! -f config.json ]]; then
-  echo "ERROR: config.json not found. Copy the template and edit it:"
-  echo "    cp config.example.json config.json   # then set clif_data_path, site, timezone"
+if [[ ! -f "sites/$SITE.json" ]]; then
+  echo "ERROR: site profile sites/$SITE.json not found (copy sites/uchicago.json)."
   exit 1
 fi
-if [[ ! -f metrics/lpv/output/02_patient_day_status.parquet ]]; then
-  echo "ERROR: metrics/lpv/output/02_patient_day_status.parquet not found — the LPV pipeline hasn't been built."
-  echo "    Run the full pipeline first:  ./run_bundle.sh"
+if [[ ! -f "output/$SITE/metrics/lpv/02_patient_day_status.parquet" ]]; then
+  echo "ERROR: output/$SITE/metrics/lpv/02_patient_day_status.parquet not found — the LPV pipeline hasn't been built for site '$SITE'."
+  echo "    Run the full pipeline first:  ./run_bundle.sh --site $SITE"
   exit 1
 fi
+echo ">>> site: $SITE  (output -> output/$SITE/)"
 
 "$PY" metrics/lpv/code/05_tile_feed.py    # re-emit the LPV feed from current parquets (no CLIF read)
 "$PY" scorecard/build_scorecard.py        # collect every metric feed + rebuild scorecard.html

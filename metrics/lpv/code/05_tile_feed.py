@@ -34,9 +34,13 @@ def _git_sha():
     except Exception:
         return None
 
-ROOT = Path(__file__).resolve().parents[3]            # bundle root (shared config.json)
+ROOT = Path(__file__).resolve().parents[3]            # bundle root (holds bundle_config.py)
 _METRIC_ROOT = Path(__file__).resolve().parents[1]    # metrics/lpv (per-metric outputs)
-CFG = json.loads((ROOT / "config.json").read_text())
+import sys as _sys
+if str(ROOT) not in _sys.path:
+    _sys.path.insert(0, str(ROOT))
+import bundle_config as _bc                            # multi-site config + output resolver
+CFG = _bc.effective("lpv")                             # site = env CLIF_SITE (default uchicago)
 OUT_DIR = Path(CFG.get("output_path", _METRIC_ROOT / "output"))
 FINAL_DIR = OUT_DIR / "final"
 FINAL_DIR.mkdir(parents=True, exist_ok=True)

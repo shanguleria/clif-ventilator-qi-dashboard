@@ -1,0 +1,14 @@
+{
+  "_comment": "Per-site profile for the multi-site QI bundle. Copy to sites/<site>.json (gitignored) and edit. Access + timezone + clif_version + unit_labels + enabled_metrics + optional vocabulary_overrides. The shared clinical definitions live in definitions/<metric>.json (committed). Run the bundle for this site with: ./run_bundle.sh --site <site>  (or CLIF_SITE=<site>). Output -> output/<site>/.",
+  "site_id": "UChicago",
+  "dataset_name": "UChicago_CLIF",
+  "data_path": "/path/to/your/CLIF_2.1.0",
+  "file_format": "parquet",
+  "timezone": "US/Central",
+  "clif_version": "2.1.0",
+  "enabled_metrics": ["lpv", "proning", "sat", "sbt"],
+  "unit_labels": {},
+  "vocabulary_overrides": {
+    "_comment": "Rarely needed — a metric key here REPLACES that whole knob block from definitions/<metric>.json for this site (e.g. site-specific mode_category strings). Leave empty when the site's CLIF vocabulary matches the canonical definitions."
+  }
+}

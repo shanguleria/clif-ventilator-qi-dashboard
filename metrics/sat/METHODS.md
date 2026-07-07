@@ -97,10 +97,10 @@ prose may need a wording pass.
 | Field | Value |
 |---|---|
 | definition_version | sat-v1 |
-| code_version (git SHA) | 66fd93f |
+| code_version (git SHA) | 0d88d6a |
 | clif_version | 2.1.0 |
 | site_id | UChicago |
-| generated | 2026-07-07T14:01 |
+| generated | 2026-07-07T17:24 |
 
 **Grain published to the scorecard:**
 
@@ -108,10 +108,11 @@ prose may need a wording pass.
 - Periods: `all`, `month`, `week`
 - Segments: Resumed sedation, Not resumed (day), Extubated same day
 
-**Definitional parameters** (from `metrics/sat/config.json`):
+**Definitional parameters** (from `definitions/sat.json`):
 
 | Parameter | Value |
 |---|---|
+| `definition_version` | sat-v1 |
 | `sat_medications.sedative_analgesic_categories` | propofol, midazolam, fentanyl, hydromorphone, morphine, remifentanil, ketamine |
 | `sat_medications.dexmedetomidine_categories` | dexmedetomidine |
 | `sat_medications.paralytic_categories` | cisatracurium |

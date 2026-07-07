@@ -196,8 +196,13 @@ def main() -> None:
     log.info("cohort hospitalization_ids: %d", len(cohort_hids))
 
     co = cohort_mod.build_orchestrator(cfg)
-    co.load_table("position", filters={"hospitalization_id": cohort_hids})
-    pos = co.position.df.copy()
+    try:
+        co.load_table("position", filters={"hospitalization_id": cohort_hids})
+        pos = co.position.df.copy()
+    except FileNotFoundError:
+        log.warning("no `position` table at this site — proning numerator is unobservable; "
+                    "emitting empty observation (proning tile will be empty, not a crash)")
+        pos = pd.DataFrame(columns=["hospitalization_id", "position_category", "recorded_dttm"])
     log.info("loaded position rows for cohort: %d (across %d hospitalizations)",
              len(pos), pos["hospitalization_id"].nunique() if not pos.empty else 0)
 
@@ -222,7 +227,7 @@ def main() -> None:
     log.info("built %d prone sessions (across %d hospitalizations); wrote %s",
              len(sessions),
              sessions["hospitalization_id"].nunique() if not sessions.empty else 0,
-             sessions_path.relative_to(PROJECT_ROOT))
+             sessions_path.relative_to(PROJECT_ROOT.parents[1]))
 
     obs = aggregate_per_hospitalization(cohort_hids, sessions, pos, adherent_hours)
     obs_path = cohort_mod.INTERMEDIATE_DIR / "proning_observation.parquet"
@@ -241,7 +246,7 @@ def main() -> None:
         for q in [0.25, 0.5, 0.75, 0.95]:
             log.info("    p%d: %.1f", int(q*100), sessions["duration_hours"].quantile(q))
         log.info("    max: %.1f", sessions["duration_hours"].max())
-    log.info("wrote: %s", obs_path.relative_to(PROJECT_ROOT))
+    log.info("wrote: %s", obs_path.relative_to(PROJECT_ROOT.parents[1]))
 
 
 if __name__ == "__main__":

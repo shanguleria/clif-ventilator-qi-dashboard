@@ -1,0 +1,52 @@
+{
+  "definition_version": "sat-v1",
+  "tables_in_use": [
+    "patient",
+    "hospitalization",
+    "adt",
+    "respiratory_support",
+    "medication_admin_continuous",
+    "medication_admin_intermittent",
+    "vitals",
+    "patient_assessments"
+  ],
+
+  "_comment_sat_medications": "med_category values CONFIRMED by code/00_probe_documentation.py at UChicago (clif_medication_admin_continuous, 6.37M rows). SAT-relevant set = drugs whose infusion must be at rate 0 for a SAT (GABAergic sedatives + opioids). Dexmedetomidine is allowed to continue and is NOT in the SAT-relevant set. Only continuous paralytic present is cisatracurium. lorazepam/rocuronium/vecuronium are NOT charted as continuous infusions here. pentobarbital (barbiturate-coma) intentionally excluded — those patients are not SAT candidates.",
+  "sat_medications": {
+    "sedative_analgesic_categories": [
+      "propofol",
+      "midazolam",
+      "fentanyl",
+      "hydromorphone",
+      "morphine",
+      "remifentanil",
+      "ketamine"
+    ],
+    "dexmedetomidine_categories": [
+      "dexmedetomidine"
+    ],
+    "paralytic_categories": [
+      "cisatracurium"
+    ]
+  },
+
+  "sat_eligibility": {
+    "exclude_paralytic_days": true,
+    "dex_only_days": "exclude"
+  },
+
+  "_comment_sat_observation": "Locked 2026-06-03 from probe + user: holds directly observable (dose==0 rows 4.88% + explicit mar_action stop/start). hold_min_minutes=30 (charting ~hourly). require_resume=false (a successful SAT may not resume; resume only needed for the Kress ratio).",
+  "sat_observation": {
+    "hold_min_minutes": 30,
+    "zero_dose_sources": ["dose_zero", "mar_action_stop"],
+    "require_resume": false,
+    "kress_half_dose_threshold": 0.5
+  },
+
+  "_comment_reporting": "denominator_mode=documented_plus_bound: headline = documented-SAT days / all eligible vent-sedation days (a real rate, holds observable); ONE sensitivity-bound segment among well-charted days + explicit-SAT-field cross-check.",
+  "reporting": {
+    "unit_attribution_anchor": "day_icu_location",
+    "small_cell_min_den": 10,
+    "denominator_mode": "documented_plus_bound"
+  }
+}

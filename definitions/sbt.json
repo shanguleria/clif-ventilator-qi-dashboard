@@ -1,0 +1,75 @@
+{
+  "definition_version": "sbt-v1",
+  "tables_in_use": [
+    "patient",
+    "hospitalization",
+    "adt",
+    "respiratory_support",
+    "medication_admin_continuous",
+    "vitals"
+  ],
+
+  "_comment_cohort": "SBT = ventilated-ICU patient-days (IMV ∩ ICU, day-expanded). seed_cache_from is null: SBT builds its OWN full ICU∩IMV respiratory_support waterfall from scratch (~35-min) rather than reusing the SAT vertical's warm cache. The SAT cache was scoped to ICU ∩ SAT-sedation hospitalizations and silently dropped never-sedated ventilated-ICU patients — exactly the population the liberal 'all IMV' denominator + 'on spontaneous mode at all' numerator need. Set to a sibling _cache path only if you accept that scope caveat.",
+  "cohort": {
+    "seed_cache_from": null
+  },
+
+  "_comment_sbt_modes": "CLIF 2.1.0 respiratory_support mode_category permissible values (lowercased by the clifpy waterfall). CONTROLLED ventilation = device imv + a controlled mode; SUPPORT (the SBT target) = pressure support/cpap. Confirm against your site's charted mode_category strings.",
+  "sbt_modes": {
+    "controlled_modes": [
+      "assist control-volume control",
+      "pressure control",
+      "pressure-regulated volume control",
+      "simv"
+    ],
+    "support_modes": [
+      "pressure support/cpap"
+    ]
+  },
+
+  "_comment_sbt_eligibility": "Jain et al. (CCM; DOI 10.1097/01.ccm.0001184980.06827.9a): a ventilated-ICU day is SBT-eligible iff >=12h controlled ventilation has accrued (cumulative-since-intubation, before the day's opportunity) AND a >=2h contiguous window that day holds FiO2<=0.50, PEEP<=8, SpO2>=88, norepinephrine-equivalent<=0.2 mcg/kg/min, AND the patient is not tracheostomized that day (trached patients excluded from numerator AND denominator). FiO2 is a fraction (waterfall scales to <=1.0).",
+  "sbt_eligibility": {
+    "controlled_min_hours": 12,
+    "stability_min_hours": 2,
+    "fio2_max": 0.50,
+    "peep_max": 8,
+    "spo2_min": 88,
+    "ne_equiv_max_mcg_kg_min": 0.2,
+    "exclude_trach_days": true,
+    "exclude_paralytic_days": true
+  },
+
+  "_comment_sbt_paralytics": "A patient on a CONTINUOUS neuromuscular blocker (paralytic) has no respiratory drive and is categorically NOT an SBT candidate that day. With exclude_paralytic_days=true, any vent-ICU day overlapping a continuous-paralytic infusion (med_dose>0, not a 'stop' mar_action; carried forward to the next record, trailing capped at 24h) is given eligibility_status 'excluded_paralytic' -> dropped from the eligible denominator and shown as a 'not eligible / justified' reason in the decomposition (analogous to deep sedation precluding an SAT). paralytic_categories are CLIF medication_admin_continuous med_category strings (lowercased match); at UChicago the present continuous agents are cisatracurium + rocuronium. Bolus-only paralytics (e.g. succinylcholine, intubation-dose rocuronium) charted in medication_admin_intermittent are NOT captured here.",
+  "sbt_paralytics": {
+    "paralytic_categories": ["cisatracurium", "rocuronium", "vecuronium", "atracurium", "pancuronium"]
+  },
+
+  "_comment_sbt_vasopressors": "Norepinephrine-equivalent (NEE) dose. clifpy has NO NEE helper; we standardize each vasopressor dose to mcg/min via clifpy.unit_converter.standardize_dose_to_base_units (merges weight_kg from vitals), divide by weight -> mcg/kg/min, then apply these factors and sum concurrent infusions. Factors = standard published NEE (Goradia 2021 / Kotani 2023): norepi 1, epi 1, phenylephrine/10, dopamine/100, vasopressin x2.5 (vasopressin in u/min, NOT weight-normalized). Inotropes (dobutamine/milrinone/isoproterenol) and angiotensin default to factor 0 (not pressors for this screen); set a nonzero factor to include them. Swap to Jain's exact factors here if obtained.",
+  "sbt_vasopressors": {
+    "ne_equivalent_factors": {
+      "norepinephrine": 1.0,
+      "epinephrine": 1.0,
+      "phenylephrine": 0.1,
+      "dopamine": 0.01,
+      "vasopressin": 2.5,
+      "dobutamine": 0.0,
+      "milrinone": 0.0,
+      "isoproterenol": 0.0,
+      "angiotensin": 0.0
+    },
+    "vasopressin_categories": ["vasopressin"]
+  },
+
+  "_comment_sbt_observation": "SBT delivered (numerator) = a CONTROLLED->SUPPORT mode transition that day, sustained >=2 min, with mode pressure support/cpap and PEEP<=8 (pressure-support arm) or PEEP<=5 (CPAP arm). Transition-only (user decision): a patient parked on support all day with no transition does NOT count. Detection runs on native-resolution waterfall rows; sites charting only hourly cannot resolve sub-hourly trials -> delivery is a lower bound (pct_native diagnostic surfaced).",
+  "sbt_observation": {
+    "support_min_minutes": 2,
+    "ps_peep_max": 8,
+    "cpap_peep_max": 5,
+    "require_transition": true
+  },
+
+  "reporting": {
+    "unit_attribution_anchor": "day_icu_location",
+    "small_cell_min_den": 10
+  }
+}

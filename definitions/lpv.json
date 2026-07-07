@@ -1,0 +1,12 @@
+{
+  "definition_version": "lpv-v1",
+  "_note": "LPV's definitional thresholds (Vt/kg cutoffs, plateau <=30, driving pressure <=15, adherence fraction, severity P/F & S/F cutoffs) are Python module constants in metrics/lpv/code/{02_features,02d_severity,05_tile_feed}.py, not config-driven. They are documented in metrics/lpv/METHODS.md (auto-scraped from code). This file exists so the multi-site loader has a definitions entry for lpv; it carries no behavioral knobs.",
+  "tables_in_use": [
+    "patient",
+    "hospitalization",
+    "adt",
+    "respiratory_support",
+    "labs",
+    "vitals"
+  ]
+}

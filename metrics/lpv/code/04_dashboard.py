@@ -30,15 +30,19 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[3]            # bundle root (shared config.json)
+ROOT = Path(__file__).resolve().parents[3]            # bundle root (holds bundle_config.py)
 _METRIC_ROOT = Path(__file__).resolve().parents[1]    # metrics/lpv (per-metric outputs)
-CFG = json.loads((ROOT / "config.json").read_text())
+import sys as _sys
+if str(ROOT) not in _sys.path:
+    _sys.path.insert(0, str(ROOT))
+import bundle_config as _bc                            # multi-site config + output resolver
+CFG = _bc.effective("lpv")                             # site = env CLIF_SITE (default uchicago)
 OUT_DIR = Path(CFG.get("output_path", _METRIC_ROOT / "output"))
 SITE = CFG.get("site", "Your Site")
 CLIF_VER = CFG.get("clif_version", "2.x")
 VENDOR = OUT_DIR / "_vendor"            # build-time cache only (Plotly is inlined into the HTML)
 VENDOR.mkdir(parents=True, exist_ok=True)
-DASH_DIR = _METRIC_ROOT / "output" / "final"  # this metric's publishable drill-down (the combiner ships it)
+DASH_DIR = OUT_DIR / "final"  # this metric's publishable drill-down (the combiner ships it)
 DASH_DIR.mkdir(parents=True, exist_ok=True)
 
 PLOTLY_URL = "https://cdn.plot.ly/plotly-2.35.2.min.js"

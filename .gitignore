@@ -5,8 +5,15 @@ __pycache__/
 .ipynb_checkpoints/
 .DS_Store
 
-# Site-specific config (each site copies config.example.json -> config.json)
+# Site-specific config (legacy single-site config.json; superseded by sites/<site>.json)
 config.json
+metrics/*/config.json
+metrics/*/config/config.json
+
+# Per-site profiles hold local data paths — site-local, gitignored. Commit sites/*.example.json only.
+# (definitions/ is the shared, versioned clinical spec and IS committed.)
+sites/*.json
+!sites/*.example.json
 
 # Internal working logs and design docs (not part of the shared template)
 .claude/

@@ -50,9 +50,13 @@ from clifpy.tables import RespiratorySupport
 # Config
 # ----------------------------------------------------------------------------
 
-ROOT = Path(__file__).resolve().parents[3]            # bundle root (shared config.json)
+ROOT = Path(__file__).resolve().parents[3]            # bundle root (holds bundle_config.py)
 _METRIC_ROOT = Path(__file__).resolve().parents[1]    # metrics/lpv (per-metric outputs)
-CFG = json.loads((ROOT / "config.json").read_text())
+import sys as _sys
+if str(ROOT) not in _sys.path:
+    _sys.path.insert(0, str(ROOT))
+import bundle_config as _bc                            # multi-site config + output resolver
+CFG = _bc.effective("lpv")                             # site = env CLIF_SITE (default uchicago)
 DATA_DIR = CFG["clif_data_path"]
 FILETYPE = CFG.get("filetype", "parquet")
 TZ = CFG.get("timezone", "US/Central")
@@ -223,7 +227,7 @@ print(f"  interval-pieces: {len(pieces):,}  (midnight crossings: {int(mask2.sum(
 # ----------------------------------------------------------------------------
 
 print("[C] Component present/pass flags ...")
-pieces["is_imv"] = pieces["device_category"] == "IMV"
+pieces["is_imv"] = pieces["device_category"].astype("string").str.upper() == "IMV"  # case-insensitive across sites
 pieces["mode_eligible"] = pieces["mode_eff"].isin(ELIGIBLE_MODES)
 elig = pieces["is_imv"] & pieces["mode_eligible"]
 

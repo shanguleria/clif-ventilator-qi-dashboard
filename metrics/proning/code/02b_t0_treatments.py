@@ -271,7 +271,7 @@ def main() -> None:
     if vt_ok.any():
         q = out.loc[vt_ok, "vt_set_at_t0"].quantile([0.25, 0.5, 0.75])
         log.info("  set Vt (mL) median %.0f (IQR %.0f–%.0f)", q[0.5], q[0.25], q[0.75])
-    log.info("wrote: %s", out_path.relative_to(PROJECT_ROOT))
+    log.info("wrote: %s", out_path.relative_to(PROJECT_ROOT.parents[1]))
 
 
 if __name__ == "__main__":
