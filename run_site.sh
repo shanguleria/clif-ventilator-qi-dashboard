@@ -55,7 +55,17 @@ time_phase(){
   echo "$START_UTC,$SITE,run_site,$name,$d,$(fmt "$d"),$SHA" >> "$CSV"
   echo ">>> $name: $(fmt "$d")   (logged -> $CSV)"
 }
-vertical(){ local m="$1"; for s in metrics/"$m"/code/0*.py; do "$PY" "$s"; done; }
+# Run a metric's numbered pipeline stages (01_ .. 05_) in order, SKIPPING 00_* probes/diagnostics
+# (those are on-demand tools that may read outputs later stages produce — running them in the build
+# crashes on a fresh clone). Mirrors each metric's own run_pipeline.sh. The [0-9]* glob also skips
+# bare helper modules (sat_infusions.py, sbt_detect.py, sbt_vasopressors.py), which are imported, not run.
+vertical(){
+  local m="$1" s
+  for s in metrics/"$m"/code/[0-9]*.py; do
+    case "$(basename "$s")" in 00_*) continue;; esac
+    "$PY" "$s"
+  done
+}
 
 echo ">>> full timed run — site: $SITE   output -> $OUT/   timing -> $CSV"
 T0=$SECONDS

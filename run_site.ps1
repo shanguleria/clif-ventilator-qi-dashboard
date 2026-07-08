@@ -47,7 +47,11 @@ function Time-Phase([string]$name, [scriptblock]$block) {
     Write-Host (">>> {0}: {1}   (logged -> {2})" -f $name, (Fmt $d), $csv)
 }
 function Run-Vertical([string]$m) {
-    Get-ChildItem "metrics\$m\code\0*.py" | ForEach-Object { & $PY $_.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
+    # Numbered pipeline stages only (01_ .. 05_), in order; skip 00_* probes and bare helper modules.
+    Get-ChildItem "metrics\$m\code\*.py" |
+        Where-Object { $_.Name -match '^[0-9]' -and $_.Name -notmatch '^00_' } |
+        Sort-Object Name |
+        ForEach-Object { & $PY $_.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
 }
 
 Write-Host ">>> full timed run - site: $Site   output -> $out/   timing -> $csv"

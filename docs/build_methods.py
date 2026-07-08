@@ -60,6 +60,17 @@ CONFIG_PATH = {
     "sbt": ROOT / "definitions/sbt.json",
 }
 
+# Canonical (site-invariant) tile titles for the committed methods index. Sourced from the tile feeds'
+# `title` (identical across sites), but pinned here so index_autogen produces the SAME docs/README
+# whether or not a given metric's feed happens to exist yet — otherwise a partial run (e.g. run_bundle
+# builds only LPV) would rewrite the other rows with raw metric keys and dirty the tracked file.
+METRIC_TITLES = {
+    "lpv": "LPV Adherence",
+    "proning": "ARDS Proning",
+    "sat": "Spontaneous Awakening Trial",
+    "sbt": "Spontaneous Breathing Trial",
+}
+
 # Top-level config keys that are plumbing, not definitions — skipped in the knob table.
 CONFIG_PLUMBING = {
     "site", "timezone", "primary_dataset", "secondary_dataset", "tables_in_use",
@@ -228,7 +239,7 @@ def index_autogen(metrics, feeds):
     rows = []
     for m in metrics:
         feed = feeds.get(m)
-        title = feed.get("title", m) if feed else m
+        title = METRIC_TITLES.get(m) or (feed.get("title") if feed else None) or m
         rows.append((
             f"**{title}**",
             f"`{_definition_version(m, feeds)}`",
