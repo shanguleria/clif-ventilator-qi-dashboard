@@ -33,7 +33,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from clifpy.tables import RespiratorySupport, Labs, Vitals
+from clifpy.tables import Labs, Vitals
 
 ROOT = Path(__file__).resolve().parents[3]            # bundle root (holds bundle_config.py)
 _METRIC_ROOT = Path(__file__).resolve().parents[1]    # metrics/lpv (per-metric outputs)
@@ -41,6 +41,7 @@ import sys as _sys
 if str(ROOT) not in _sys.path:
     _sys.path.insert(0, str(ROOT))
 import bundle_config as _bc                            # multi-site config + output resolver
+from common.resp_support import load_clean             # shared Level-0 respiratory_support loader
 CFG = _bc.effective("lpv")                             # site = env CLIF_SITE (default uchicago)
 DATA_DIR = CFG["clif_data_path"]
 FILETYPE = CFG.get("filetype", "parquet")
@@ -74,19 +75,10 @@ cohort["hospitalization_id"] = cohort["hospitalization_id"].astype(str)
 cohort["calendar_day"] = pd.to_datetime(cohort["calendar_day"]).dt.date
 cohort_ids = cohort["hospitalization_id"].unique().tolist()
 
-rs_tbl = RespiratorySupport.from_file(
-    DATA_DIR, filetype=FILETYPE, timezone=TZ,
-    filters={"hospitalization_id": cohort_ids},
+rs = load_clean(
+    DATA_DIR, FILETYPE, TZ, cohort_ids,
     columns=["hospitalization_id", "recorded_dttm", "fio2_set", "peep_obs", "peep_set"],
 )
-try:
-    from clifpy.utils.outlier_handler import apply_outlier_handling
-    apply_outlier_handling(rs_tbl)
-except Exception:
-    pass
-rs = rs_tbl.df
-rs["hospitalization_id"] = rs["hospitalization_id"].astype(str)
-rs["recorded_dttm"] = to_central(rs["recorded_dttm"])
 rs = rs.dropna(subset=["recorded_dttm"])
 rs["peep"] = rs["peep_obs"].fillna(rs["peep_set"])
 

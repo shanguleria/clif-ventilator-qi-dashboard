@@ -44,8 +44,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from clifpy.tables import RespiratorySupport
-
 # ----------------------------------------------------------------------------
 # Config
 # ----------------------------------------------------------------------------
@@ -56,6 +54,7 @@ import sys as _sys
 if str(ROOT) not in _sys.path:
     _sys.path.insert(0, str(ROOT))
 import bundle_config as _bc                            # multi-site config + output resolver
+from common.resp_support import load_clean             # shared Level-0 respiratory_support loader
 CFG = _bc.effective("lpv")                             # site = env CLIF_SITE (default uchicago)
 DATA_DIR = CFG["clif_data_path"]
 FILETYPE = CFG.get("filetype", "parquet")
@@ -82,12 +81,6 @@ ELIGIBLE_MODES = {
 VT_MAX_DEFAULT = 6.0   # default Vt/kg cutoff for stored status (dashboard slider overrides)
 PLATEAU_MAX = 30.0     # fixed
 DP_MAX = 15.0          # fixed
-
-FALLBACK_RANGES = {
-    "tidal_volume_obs": (100.0, 3000.0), "tidal_volume_set": (100.0, 3000.0),
-    "plateau_pressure_obs": (0.0, 100.0), "peep_obs": (0.0, 50.0),
-    "peep_set": (0.0, 30.0), "fio2_set": (0.21, 1.0),
-}
 
 MEASURES = ["vt", "plat", "dp", "comp"]
 
@@ -140,33 +133,15 @@ span = (cohort.groupby("hospitalization_id")["calendar_day"]
         .rename("encounter_span_days").reset_index())
 unit_map = cohort[["hospitalization_id", "calendar_day", "assigned_unit", "assigned_unit_name"]]
 
-print("[0] Loading respiratory_support (all device categories, cohort hosps) ...")
-rs_tbl = RespiratorySupport.from_file(
-    DATA_DIR, filetype=FILETYPE, timezone=TZ,
-    filters={"hospitalization_id": cohort_hosp_ids},
+print("[0] Loading respiratory_support (Level-0 clean, cohort hosps) ...")
+rs = load_clean(
+    DATA_DIR, FILETYPE, TZ, cohort_hosp_ids,
     columns=[
         "hospitalization_id", "recorded_dttm", "device_category", "mode_category",
         "tracheostomy", "tidal_volume_obs", "tidal_volume_set",
         "plateau_pressure_obs", "peep_obs", "peep_set", "fio2_set",
     ],
 )
-
-print("[0] Applying outlier handling ...")
-try:
-    from clifpy.utils.outlier_handler import apply_outlier_handling
-    apply_outlier_handling(rs_tbl)
-    rs = rs_tbl.df
-    print("  used clifpy apply_outlier_handling")
-except Exception as e:  # pragma: no cover
-    print(f"  clifpy helper unavailable ({e}); using manual ranges")
-    rs = rs_tbl.df
-    for col, (lo, hi) in FALLBACK_RANGES.items():
-        if col in rs.columns:
-            v = pd.to_numeric(rs[col], errors="coerce")
-            rs[col] = v.where((v >= lo) & (v <= hi))
-
-rs["hospitalization_id"] = rs["hospitalization_id"].astype(str)
-rs["recorded_dttm"] = to_central(rs["recorded_dttm"])
 rs = rs.dropna(subset=["recorded_dttm"]).sort_values(
     ["hospitalization_id", "recorded_dttm"]).reset_index(drop=True)
 print(f"  respiratory_support rows: {len(rs):,}")
@@ -228,7 +203,7 @@ print(f"  interval-pieces: {len(pieces):,}  (midnight crossings: {int(mask2.sum(
 
 print("[C] Component present/pass flags ...")
 pieces["is_imv"] = pieces["device_category"].astype("string").str.upper() == "IMV"  # case-insensitive across sites
-pieces["mode_eligible"] = pieces["mode_eff"].isin(ELIGIBLE_MODES)
+pieces["mode_eligible"] = pieces["mode_eff"].isin({m.lower() for m in ELIGIBLE_MODES})
 elig = pieces["is_imv"] & pieces["mode_eligible"]
 
 pieces["vt_per_pbw"] = pieces["tv_eff"] / pieces["pbw_kg"]
