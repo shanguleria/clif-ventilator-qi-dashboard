@@ -129,7 +129,8 @@ Everything a run produces is namespaced under **`output/<site>/`** (entirely git
 
 `output_to_share/` is assembled by `scorecard/collect_to_share.py` (run automatically at the end of the
 runners). The feeds in it are re-checked for `hospitalization_id`/`patient_id` and the build aborts if a
-row-level id ever appears.
+row-level id ever appears. A `run_site.sh` run also writes **`output/<site>/run_timings.csv`** — per-phase
++ total wall-clock, one row per run (for reporting how long a site takes, cold vs. warm cache).
 
 ---
 
@@ -154,13 +155,23 @@ row-level id ever appears.
 
 ## Running the pipeline
 
-The runner builds the **LPV** pipeline → scorecard combiner → methods docs → `output_to_share/`.
+**Full timed build of all four metrics (recommended):** `run_site.sh` runs LPV + proning + sat + sbt +
+scorecard end-to-end, **times each phase**, and appends per-phase + total wall-clock to
+`output/<site>/run_timings.csv` (one row per run, so cold vs. warm-cache runs accumulate).
 
-**macOS / Linux:**
+```bash
+./run_site.sh --site <site>              # macOS/Linux   (Windows: .\run_site.ps1 -Site <site>)
+open output/<site>/dashboard/scorecard.html
+```
+
+First run builds the ~35-min-each respiratory-support waterfalls (cached afterward), so budget ~1.5–2 h
+cold, minutes warm; a timing summary prints at the end.
+
+**LPV-only building block:** `run_bundle.sh` builds just the LPV pipeline → scorecard → methods docs →
+`output_to_share/` (it's what `run_site.sh` calls for phase 1). Handy when only LPV changed:
 
 ```bash
 ./run_bundle.sh --site <site>            # or: CLIF_SITE=<site> ./run_bundle.sh
-open output/<site>/dashboard/scorecard.html
 ```
 
 **Windows (PowerShell):**
@@ -214,7 +225,8 @@ definitions/            # SHARED, versioned clinical spec — thresholds, catego
 sites/                  # per-site profiles (real ones gitignored; *.example.json committed)
   uchicago.example.json  mimic.example.json
 requirements.txt        # one shared venv for the whole bundle
-run_bundle.sh / .ps1        # one-command build for a site (macOS/Linux / Windows)
+run_site.sh / .ps1          # FULL timed build of all 4 metrics (wraps run_bundle + verticals + refresh); logs run_timings.csv
+run_bundle.sh / .ps1        # LPV pipeline + scorecard + methods + output_to_share (phase 1 of run_site)
 refresh_scorecard.sh / .ps1 # fast scorecard-only rebuild (no CLIF re-read)
 contract/               # the tile-feed spec + JSON Schema (the only thing the scorecard depends on)
 docs/                   # living methods/data-dictionary (build_methods.py + index + scorecard doc + portability report)
@@ -317,10 +329,8 @@ cp sites/uchicago.example.json sites/site3.json         # set site_id, data_path
 CLIF_SITE=site3 .venv/bin/python metrics/lpv/code/00_probe_missingness.py    # device/mode categories, plateau/height coverage
 CLIF_SITE=site3 .venv/bin/python metrics/sat/code/00_probe_documentation.py  # med_category drug inventory
 
-# 4. build all metrics
-CLIF_SITE=site3 ./run_bundle.sh                          # LPV + scorecard + methods + output_to_share
-for m in proning sat sbt; do for s in metrics/$m/code/0*.py; do CLIF_SITE=site3 .venv/bin/python "$s"; done; done
-CLIF_SITE=site3 ./refresh_scorecard.sh                   # recombine + re-assemble output_to_share
+# 4. build all four metrics (timed; first run builds the ~35-min-each waterfalls)
+./run_site.sh --site site3                               # LPV + proning + sat + sbt + scorecard; timing -> output/site3/run_timings.csv
 
 open output/site3/dashboard/scorecard.html
 ```
