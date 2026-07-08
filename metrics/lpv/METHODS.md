@@ -88,10 +88,10 @@ below rather than silently disappearing.
 | Field | Value |
 |---|---|
 | definition_version | lpv-v1 |
-| code_version (git SHA) | 0d88d6a |
+| code_version (git SHA) | 4a77065 |
 | clif_version | 2.1.0 |
 | site_id | UChicago |
-| generated | 2026-07-07T17:24 |
+| generated | 2026-07-08T13:38 |
 
 **Grain published to the scorecard:**
 

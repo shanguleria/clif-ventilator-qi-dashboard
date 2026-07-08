@@ -1,267 +1,189 @@
 # CLIF ICU Ventilator-QI Bundle Dashboard
 
-A reproducible [CLIF](https://clif-consortium.github.io/website/) **monorepo** that builds a
-glanceable **ICU ventilator / liberation QI bundle scorecard** — one tile per metric — plus a
-detailed drill-down per metric. Each metric is its own self-contained pipeline that emits a small,
-PHI-free **tile feed**; the scorecard is a combiner that collects them.
+*ICU ventilator / liberation quality-improvement bundle — lung-protective ventilation, ARDS proning,
+and spontaneous awakening/breathing trials — as a glanceable multi-site scorecard.*
 
-The bundle is **multi-site**: any CLIF site clones this repo, drops in a small per-site profile
-(`sites/<site>.json`), and runs one command to produce its own scorecard under `output/<site>/`.
-The **clinical definitions are shared and versioned** (`definitions/`), so numbers are comparable
-across sites. It is **descriptive epidemiology only** — no outcome modeling.
+A reproducible [CLIF](https://clif-consortium.github.io/website/) **monorepo**: one tile per metric on a
+scorecard, plus a detailed drill-down per metric. Each metric is its own self-contained pipeline that
+emits a small, PHI-free **tile feed**; the scorecard is a combiner that collects them. The bundle is
+**multi-site** — any CLIF site clones the repo, adds a per-site profile, and runs one command to produce
+its own scorecard and a PHI-free deliverables folder under `output/<site>/`.
 
 ![CLIF](https://img.shields.io/badge/CLIF-2.x%20(1.1.0%20validated)-blue) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
-**Metrics shipped today (all live):** **LPV** (lung-protective ventilation — the reference
-implementation), **ARDS proning**, **SAT** (spontaneous awakening trials), **SBT** (spontaneous
-breathing trials). Mobilization is a placeholder tile. The bundle has been run end-to-end on two
-independent CLIF sites (UChicago v2.1.0 and MIMIC-IV CLIF v1.1.0) — see
-[`docs/portability_mimic.md`](docs/portability_mimic.md).
+---
+
+## Objective
+
+Report, as **descriptive epidemiology** (no outcome or causal modeling), how often four evidence-based
+ICU ventilator / liberation practices are delivered, at the level of the ventilated ICU patient-day (or
+eligible encounter), broken down by ICU unit and over time:
+
+| Metric | Measures | Reference |
+|---|---|---|
+| **LPV** — Lung-Protective Ventilation | tidal volume ≤ 8 mL/kg PBW (+ plateau ≤ 30, ∆P ≤ 15 components) | ARDSNet |
+| **Proning** — ARDS prone positioning | ever proned among PROSEVA-strict–eligible encounters | Guérin, NEJM 2013 |
+| **SAT** — Spontaneous Awakening Trial | daily sedation interruption on eligible vent-sedation days | Kress, NEJM 2000 |
+| **SBT** — Spontaneous Breathing Trial | controlled→spontaneous transition on eligible days | Jain, CCM |
+
+Mobilization is a placeholder tile. The pipeline covers cohort derivation, per-patient-day/-encounter
+feature construction, rule application, and unit × time aggregation. It has run end-to-end on two
+independent CLIF sites (UChicago v2.1.0, MIMIC-IV CLIF v1.1.0 — see
+[`docs/portability_mimic.md`](docs/portability_mimic.md)).
 
 ---
 
-## What it produces
+## Required CLIF tables and fields
 
-Each build writes a self-contained, shippable bundle to **`output/<site>/dashboard/`**
-(e.g. `output/uchicago/dashboard/`, `output/mimic/dashboard/`) — output is namespaced by site, so
-several sites coexist in one clone:
+**CLIF 2.x** (validated also on a 1.1.0 dataset), read via [`clifpy`](https://pypi.org/project/clifpy/)
+as the `file_format` in the site profile (default `parquet`, files named `clif_<table>.parquet`). Standard
+CLIF mCIDE category values are assumed; outlier handling uses clifpy's built-in ranges. All four metrics
+process `respiratory_support` through clifpy's waterfall (so `device_category` casing is normalized) and
+attribute ICU units via `adt`.
 
-- **`scorecard.html`** — the glanceable ICU ventilator-QI bundle scorecard (open this).
-- **`lpv_dashboard.html`**, **`proning_dashboard.html`**, **`sat_dashboard.html`**,
-  **`sbt_dashboard.html`** — each metric's detailed drill-down (the scorecard tiles link here).
+**Shared by all four metrics:**
 
-The whole `output/<site>/dashboard/` folder travels together (the HTML files cross-link by relative
-name). `lpv_dashboard.html` (~8 MB, Plotly inlined, works offline) has four tabs: **Tidal Volume**,
-**Component breakdown**, **By unit & over time**, and **Distributions & cohort**.
+| Table | Fields / categorical values |
+|---|---|
+| `respiratory_support` | `device_category == "imv"`, `mode_category`, `fio2_set`, `peep_obs`/`peep_set`, `tracheostomy`, extubation events |
+| `adt` | ICU windows: `location_category == "icu"`, `location_type` (default unit grain), `location_name` (specific-unit grain) |
+| `patient` | `sex_category`, `death_dttm` |
+| `hospitalization` | `age_at_admission` (adult filter), admission/discharge timing |
 
----
+**Additional, per metric:**
 
-## Definitions & provenance
+| Metric | Additional tables & fields |
+|---|---|
+| **LPV** | `respiratory_support`: `tidal_volume_obs`/`_set`, `plateau_pressure_obs`. `vitals`: `height_cm` (PBW), `spo2` (S/F surrogate). `labs`: `pao2` (P/F severity strata) |
+| **Proning** | `labs`: `po2_arterial` (P/F gating at T₀/eligibility). `position`: `position_category == "prone"` (numerator). `medication_admin_continuous`: vasopressor + continuous-paralytic presence at T₀ (PROSEVA Table 1). `vitals`: `spo2` (optional S/F onset) |
+| **SAT** | `medication_admin_continuous`: sedative/analgesic `med_category` (propofol, midazolam, fentanyl, hydromorphone, morphine, remifentanil, ketamine), `med_dose`, `mar_action` (stop/start); dexmedetomidine (ignored, may continue); continuous paralytic (excludes the day). `patient_assessments`/`vitals`: RASS (secondary validation only) |
+| **SBT** | `respiratory_support`: `mode_category` controlled (AC-VC, PC, PRVC, SIMV) vs support (PS/CPAP), `pressure_support_set`, `peep_set`. `medication_admin_continuous`: vasopressors (norepinephrine-equivalent stability screen), continuous paralytics (exclusion). `vitals`: `spo2`, `weight_kg` |
 
-This is what makes cross-site numbers trustworthy and auditable — if someone asks *"how was the
-denominator for month X's SAT rate defined, and by which version of the code?"*, the answer is here.
-
-### Shared, versioned definitions — `definitions/`
-
-Every clinical knob lives in **`definitions/<metric>.json`** (`lpv`, `proning`, `sat`, `sbt`):
-thresholds, hour windows, eligibility rules, and the canonical (lowercased) drug/mode category
-lists. These are **identical across sites** and committed to the repo, and each carries a
-**`definition_version`** string. Sites do **not** edit definitions; a site profile may only supply
-*additive* `vocabulary_overrides` when its category strings differ. (LPV's `definitions/lpv.json` is
-a thin stub — its thresholds are named Python constants in `metrics/lpv/code/02_features.py`; see
-[Customizing](#customizing-the-lpv-analytic-choices).)
-
-### Living methods docs — `docs/`
-
-Human-readable methods, one per tile, that never drift from the code:
-
-- **[`docs/README.md`](docs/README.md)** — the methods / data-dictionary index.
-- **`metrics/<id>/METHODS.md`** — per-metric definitions, denominators, and data sources (prose +
-  an auto-stamped facts block).
-- **[`docs/scorecard_methods.md`](docs/scorecard_methods.md)** — how the combiner assembles tiles.
-
-The facts blocks (thresholds, drug/mode lists, current headline numbers, provenance) are
-**machine-stamped from `definitions/` + the tile feeds by [`docs/build_methods.py`](docs/build_methods.py)**,
-which runs at the end of `run_bundle.sh` / `refresh_scorecard.sh`. So the docs are regenerated on
-every build and cannot silently diverge from the pipeline.
-
-### Provenance block — on every tile feed
-
-Every `tile_feed_<metric>.json` carries a PHI-free provenance block, so any number on the scorecard
-is traceable to the exact code and definitions that produced it:
-
-```json
-"provenance": {
-  "site_id": "UChicago",        "clif_version": "2.1.0",
-  "code_version": "12c3d31",    "definition_version": "sat-v1",
-  "generated": "2026-07-07T17:41"
-}
-```
-
-`code_version` is the git SHA; `definition_version` comes from `definitions/<metric>.json`. Pooling
-across sites stays honest because a feed announces which definition/code produced it.
-
-### Portability report
-
-[`docs/portability_mimic.md`](docs/portability_mimic.md) is a worked second-site example — cohort
-sizes, cross-site headline rates, coverage diagnostics, and the two small fixes the MIMIC run
-required (both generalized).
+If a site's category strings differ from the shared `definitions/`, add a `vocabulary_overrides` block to
+its profile (see [Configuration](#configuration)); confirm first with the probes in
+[Onboarding a new site](#onboarding-a-new-site).
 
 ---
 
-## Quick start (existing profile)
+## Cohort identification
+
+Unit of analysis is the **ventilated ICU patient-day** (`hospitalization_id` × calendar day, binned in
+the site timezone), except proning, which is the **eligible encounter**.
+
+- **LPV** — adult (≥18) ICU hospitalizations with ≥1 IMV episode during an ICU window. No ARDS
+  restriction. Assessability floors apply per component (a day counts only with enough charted signal).
+- **Proning** — two nested gates: an **ARDS cohort** at T₀ (age ≥18, IMV, PEEP ≥5, FiO₂ ≥0.4, P/F ≤300, in
+  ICU), then **PROSEVA-strict eligibility** (a first qualifying ABG with FiO₂ ≥0.6 & P/F ≤150, a second
+  ≥12 h later, no extubation in between). One row per eligible encounter; ever-proned is a *process floor*
+  (the `position` table charts only proning episodes).
+- **SAT** — ventilated ICU patient-days with ≥1 SAT-relevant continuous sedative/analgesic infusion.
+  Continuous-paralytic days and dexmedetomidine-only days are excluded.
+- **SBT** — same vent-ICU-day universe (built from its own ICU∩IMV waterfall, so never-sedated patients
+  are included). Strict eligibility = transition-candidate day (≥12 h controlled ventilation, a ≥2 h
+  stable-physiology window, non-trach, non-paralytic, with a controlled→support transition present).
+
+Each metric emits a PHI-free `tile_feed_<metric>.json` (num/den at every unit × period grain) plus a
+detailed dashboard HTML; proning/sat/sbt also emit a federation-shareable `metrics_site_summary.csv` and
+`metrics_slices.csv`. See [Where outputs land](#where-outputs-land).
+
+---
+
+## Configuration
+
+Clinical definitions are **shared and versioned**; only site access differs.
+
+- **`definitions/<metric>.json`** — the shared clinical spec (thresholds, hour windows, canonical drug/
+  mode category lists), identical across sites, each with a `definition_version`. **Committed; sites do
+  not edit these.** (LPV's is a stub — its thresholds are named Python constants; see
+  [Customizing](#customizing-the-lpv-analytic-choices).)
+- **`sites/<site>.json`** — your per-site profile. Copy an example and edit:
+
+  ```bash
+  cp sites/uchicago.example.json sites/<site>.json
+  ```
+
+  | Field | Meaning |
+  |---|---|
+  | `site_id` | Site label — appears in the dashboard title + each feed's provenance |
+  | `data_path` | Absolute path to your CLIF tables directory |
+  | `file_format` | `parquet` (default), `csv`, … — passed to clifpy |
+  | `timezone` | Calendar-day binning tz (e.g. `US/Central`). **Use `UTC` for date-shifted de-identified data like MIMIC** |
+  | `clif_version` | Your CLIF version string (recorded in provenance) |
+  | `enabled_metrics` | Which tiles to build, e.g. `["lpv","proning","sat","sbt"]` — omit any you can't support |
+  | `unit_labels` | *(optional)* friendly names for specific ICU units, e.g. `{"N09S":"MICU North"}` |
+  | `vocabulary_overrides` | *(optional)* additive overrides when your category strings differ from `definitions/` |
+
+  `sites/*.json` is **gitignored** (holds your local data path); commit only `sites/*.example.json`.
+  The active site is the env var `CLIF_SITE` (default `uchicago`) or the `--site`/`-Site` runner flag.
+
+### Where outputs land
+
+Everything a run produces is namespaced under **`output/<site>/`** (entirely gitignored):
+
+| Path | Contents | Shareable? |
+|---|---|---|
+| `output/<site>/metrics/<id>/intermediate/`, `.../final/` | per-metric working + final artifacts, **including row-level parquet** — the PHI / working space (the consortium's `output_phi` analogue) | **No** — never leaves the machine |
+| `output/<site>/dashboard/` | rendered `scorecard.html` + per-metric drill-downs (aggregate-only HTML) | aggregate |
+| `output/<site>/feeds/` | collected PHI-free tile feeds | yes |
+| **`output/<site>/output_to_share/`** | **the deliverables a coordinating center receives**: `feeds/<site>_tile_feed_<m>.json` (poolable num/den data, hard PHI-checked), `dashboards/`, `methods/`, and `manifest.json` (versions + per-metric headline num/den + file inventory) | **yes — upload this** |
+
+`output_to_share/` is assembled by `scorecard/collect_to_share.py` (run automatically at the end of the
+runners). The feeds in it are re-checked for `hospitalization_id`/`patient_id` and the build aborts if a
+row-level id ever appears.
+
+---
+
+## Prerequisites
+
+- **Python 3.10+** (`python3 --version`). No R required.
+- One shared virtualenv for the whole bundle:
+
+  ```bash
+  python3 -m venv .venv
+  .venv/bin/pip install -r requirements.txt        # Windows: .venv\Scripts\python.exe -m pip install -r requirements.txt
+  ```
+
+  Key dependency: [`clifpy`](https://pypi.org/project/clifpy/) (CLIF loading + respiratory-support
+  waterfall); plus pandas, duckdb, plotly, matplotlib.
+- Your CLIF tables as `clif_<table>.parquet` at the profile's `data_path`.
+
+---
+
+## Running the pipeline
+
+The runner builds the **LPV** pipeline → scorecard combiner → methods docs → `output_to_share/`.
+
+**macOS / Linux:**
 
 ```bash
-# 1. Clone
-git clone https://github.com/shanguleria/clif-ventilator-qi-dashboard.git && cd clif-ventilator-qi-dashboard
-
-# 2. One shared Python environment for the whole bundle
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-
-# 3. Point a site profile at your CLIF data (definitions/ are shared — do not edit them)
-cp sites/uchicago.example.json sites/uchicago.json     # then edit data_path, timezone, etc.
-
-# 4. Build the LPV pipeline + methods docs + scorecard for that site
-./run_bundle.sh --site uchicago                        # or: CLIF_SITE=uchicago ./run_bundle.sh
-
-# 5. Open the scorecard (tiles link to each metric's drill-down)
-open output/uchicago/dashboard/scorecard.html          # macOS  (Linux: xdg-open)
+./run_bundle.sh --site <site>            # or: CLIF_SITE=<site> ./run_bundle.sh
+open output/<site>/dashboard/scorecard.html
 ```
 
-`run_bundle.sh` builds the **LPV** pipeline, regenerates the methods docs, and renders the scorecard.
-**proning / sat / sbt are their own pipelines** — run their stages under the same `CLIF_SITE`
-(each builds a respiratory-support waterfall on first run, ~35 min, cached thereafter); the scorecard
-then collects whatever feeds exist. See [Onboarding a new site](#onboarding-a-new-site) for the full
-sequence.
+**Windows (PowerShell):**
 
-### The site profile — `sites/<site>.json`
+```powershell
+# first time, if scripts are blocked:  Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\run_bundle.ps1 -Site <site>
+Invoke-Item output\<site>\dashboard\scorecard.html
+```
 
-| Field | Meaning |
-|---|---|
-| `site_id` | Your site label — appears in the dashboard title + each feed's provenance |
-| `data_path` | Absolute path to your CLIF tables directory |
-| `file_format` | `parquet` (default), `csv`, etc. — passed to clifpy |
-| `timezone` | Your site's tz (e.g. `US/Central`), used for calendar-day binning. **Use `UTC` for date-shifted de-identified data like MIMIC** |
-| `clif_version` | Your CLIF version string (descriptive; recorded in provenance) |
-| `enabled_metrics` | Which metric tiles to build, e.g. `["lpv","proning","sat","sbt"]`. Omit a metric you can't support; a slot with no feed shows a "Coming soon…" placeholder |
-| `unit_labels` | *(optional)* Friendly display names for specific ICU units, e.g. `{"N09S":"MICU North"}` — see [Grouping ICUs](#grouping-icus-by-specific-unit) |
-| `vocabulary_overrides` | *(optional)* Additive overrides when your category strings differ from `definitions/` |
-
-`sites/*.json` is **gitignored** so your data path stays local — commit only `sites/*.example.json`.
-`definitions/` **is** committed (shared, non-secret). Ready-made examples: `sites/uchicago.example.json`,
-`sites/mimic.example.json`.
-
-### Grouping ICUs by specific unit
-
-Every by-unit breakdown (`location_type` vs `location_name`) has a **"Group ICUs by"** toggle: **ICU type** (CLIF `location_type`, e.g.
-`medical_icu`) or **Specific unit** (CLIF `location_name`, the physical unit). The specific-unit grain
-is computed nested within the type, so type-level numbers never change. The toggle appears only when
-at least one `location_type` splits into multiple `location_name`s. Unmapped codes show raw; add a
-`unit_labels` map to your profile to show friendly names (no code change, scorecard rebuild only).
-
----
-
-## Onboarding a new site
-
-Cloning the repo onto a machine that has a new site's CLIF data and running it end-to-end:
+**The other three metrics (proning / sat / sbt) are their own pipelines** — run their stages under the
+same `CLIF_SITE` (each builds a respiratory-support waterfall on first run, ~35 min, cached thereafter):
 
 ```bash
-# 1. Clone + one shared venv
-git clone https://github.com/shanguleria/clif-ventilator-qi-dashboard.git && cd clif-ventilator-qi-dashboard
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-
-# 2. Create the site profile (definitions/ stay shared and unchanged)
-cp sites/uchicago.example.json sites/site3.json         # set site_id, data_path, timezone, clif_version, enabled_metrics
-
-# 3. CONFIRM VOCABULARY before trusting numbers (aggregate summaries only — no patient rows)
-CLIF_SITE=site3 .venv/bin/python metrics/lpv/code/00_probe_missingness.py    # device/mode categories, plateau/height coverage
-CLIF_SITE=site3 .venv/bin/python metrics/sat/code/00_probe_documentation.py  # med_category drug inventory
-
-# 4. Build all metrics for the site
-CLIF_SITE=site3 ./run_bundle.sh                          # LPV + methods + scorecard
-for m in proning sat sbt; do                             # each ~35-min waterfall on first run, then cached
-  for s in metrics/$m/code/0*.py; do CLIF_SITE=site3 .venv/bin/python "$s"; done
-done
-CLIF_SITE=site3 .venv/bin/python scorecard/build_scorecard.py   # collect all four feeds
-
-# 5. Open it
-open output/site3/dashboard/scorecard.html
+for m in proning sat sbt; do for s in metrics/$m/code/0*.py; do CLIF_SITE=<site> .venv/bin/python "$s"; done; done
 ```
 
-**What the clone gives you:** all code + the shared `definitions/` + `docs/` + the example profiles.
-**What it does *not*** (gitignored, by design): any data, `output/`, real `sites/*.json`, `.claude/`
-logs, and `assets/` artwork (the scorecard falls back to inline SVG — cosmetic only), so a fresh
-clone still builds.
-
-**The one real caveat — vocabulary.** CLIF permissible values vary by site (casing, exact strings).
-If a site's categories differ from `definitions/`, a metric can silently under-count. Eyeball the
-probes in step 3 and, if needed, add a `vocabulary_overrides` block to the profile. Things to check:
-- `respiratory_support.device_category` (`IMV`); `mode_category` controlled/support strings
-- `medication_admin_continuous.med_category` sedative/paralytic/vasopressor names
-- `labs.lab_category` arterial PaO₂ (`po2_arterial`); `vitals` (`spo2` / `height_cm` / `weight_kg`);
-  `adt.location_category` (`icu`); `position_category` (`prone`)
-
-**Two hard-failure gotchas:** clifpy loads files named **`clif_<table>.parquet`** — differently named
-files won't load; and a very different `clif_version` can shift column names (clifpy applies its
-bundled schema regardless). **Data safety:** run it on the site's machine — raw data stays local; if
-you need help debugging, share only aggregate output/logs (counts, category value_counts), never rows.
-
-See [`docs/portability_mimic.md`](docs/portability_mimic.md) for a real worked example (MIMIC needed
-exactly two small, now-generalized fixes).
+Then re-collect: `./refresh_scorecard.sh --site <site>` (or `.\refresh_scorecard.ps1 -Site <site>`) —
+a fast scorecard + methods + `output_to_share` rebuild with **no CLIF re-read**. Full onboarding walkthrough
+(including vocabulary confirmation) in [Onboarding a new site](#onboarding-a-new-site).
 
 ---
 
-## The LPV bundle
+## Pipeline steps
 
-Three components, evaluated on **mode-eligible IMV time**, time-weighted within each patient-day
-(a day is "adherent" for a measure if ≥80% of its assessable time meets the threshold, with a
-≥60-minute assessable floor):
-
-1. **Tidal volume** ≤ 6 mL/kg predicted body weight (PBW) — *cutoff is adjustable in the dashboard*
-2. **Plateau pressure** ≤ 30 cm H₂O — fixed
-3. **Driving pressure** (∆P = Plateau − PEEP) ≤ 15 cm H₂O — fixed
-
-Each component is reported on **its own denominator** (plus a strict joint composite), because the
-components have very different missingness (Vt densely charted, plateau sparse) — a single composite
-would force well-measured Vt to share plateau's small denominator. PBW uses the Devine/ARDSnet
-formula from `patient.sex_category` and height (`vitals.height_cm`).
-
-### CLIF tables required (LPV metric)
-
-CLIF 2.x, as the `file_format` in the site profile (default `parquet`):
-
-| Table | Used for |
-|---|---|
-| `patient` | `sex_category` (PBW) |
-| `hospitalization` | `age_at_admission` (adult filter — the CLIF-canonical column) |
-| `adt` | ICU location windows (`location_category == 'icu'`, `location_type`, `location_name`) |
-| `respiratory_support` | `device_category == 'IMV'`, `mode_category`, `tidal_volume_obs/set`, `plateau_pressure_obs`, `peep_obs/set`, `fio2_set` |
-| `vitals` | `vital_category == 'height_cm'` (PBW); `vital_category == 'spo2'` (severity S/F surrogate) |
-| `labs` | `lab_category == 'po2_arterial'` (severity P/F ratio) |
-
-(proning / sat / sbt use additional tables — see each metric's `METHODS.md` and `CLAUDE.md`.) Standard
-CLIF mCIDE category values are assumed; outlier handling uses clifpy's built-in ranges.
-
-### Severity stratifier (LPV)
-
-The LPV dashboard includes a **Severity filter** ("severe respiratory failure" = P/F < 300, or the
-S/F surrogate < 315 at SpO₂ ≤ 97%, **and** PEEP > 5; FiO₂/PEEP paired within a 4-hour lookback; worst
-oxygenation of the day) — **not** full Berlin ARDS. Thresholds are named constants in
-`metrics/lpv/code/02d_severity.py`.
-
----
-
-## Repository layout
-
-```
-bundle_config.py        # site-aware config+output resolver: merges definitions/ ⊕ sites/<site>.json
-definitions/            # SHARED, versioned clinical spec — thresholds, category lists, definition_version
-  lpv.json  proning.json  sat.json  sbt.json
-sites/                  # per-site profiles (real ones gitignored; *.example.json committed)
-  uchicago.example.json  mimic.example.json
-requirements.txt        # one shared venv for the whole bundle
-run_bundle.sh           # one-command build for a site: LPV pipeline -> methods docs -> scorecard
-refresh_scorecard.sh    # fast scorecard-only rebuild (no CLIF re-read)
-contract/               # the tile-feed spec + JSON Schema (the only thing the scorecard depends on)
-docs/                   # living methods/data-dictionary (build_methods.py + index + scorecard doc + portability report)
-metrics/                # one folder per QI vertical (see metrics/README.md)
-  lpv/      code/ ... METHODS.md   # the reference metric: 01_cohort -> 04_dashboard + 05_tile_feed
-  proning/  code/ ... METHODS.md
-  sat/      code/ ... METHODS.md
-  sbt/      code/ ... METHODS.md
-scorecard/              # build_scorecard.py — the combiner (collects feeds, renders scorecard.html)
-output/<site>/          # per-site build artifacts (gitignored)
-  metrics/<id>/{intermediate,final}/ ...   # each metric's outputs + tile_feed_<id>.json
-  dashboard/            # the shippable bundle: scorecard.html + each metric's drill-down
-```
-
-Each metric emits `output/<site>/metrics/<id>/final/tile_feed_<id>.json` (+ its `<id>_dashboard.html`).
-The combiner collects every metric in the site's `enabled_metrics`, ships the drill-downs into
-`output/<site>/dashboard/`, and renders the scorecard.
-
-## Pipeline (LPV metric + combiner)
-
-`run_bundle.sh --site <id>` runs these in order (writing under `output/<site>/`):
+`run_bundle.sh` / `run_bundle.ps1` run, in order (writing under `output/<site>/`):
 
 | Step | Script | Output |
 |---|---|---|
@@ -271,50 +193,83 @@ The combiner collects every metric in the site's `enabled_metrics`, ships the dr
 | 3 | `metrics/lpv/code/03_aggregate.py` | (time × unit, severity) rollups + Vt-cutoff grid |
 | 4 | `metrics/lpv/code/04_dashboard.py` | `output/<site>/metrics/lpv/final/lpv_dashboard.html` |
 | 5 | `metrics/lpv/code/05_tile_feed.py` | `output/<site>/metrics/lpv/final/tile_feed_lpv.json` |
-| → | `docs/build_methods.py` | regenerates the METHODS docs' auto-stamped facts |
 | → | `scorecard/build_scorecard.py` | **`output/<site>/dashboard/scorecard.html`** (collects every enabled metric) |
+| → | `docs/build_methods.py` | regenerates the METHODS docs' auto-stamped facts |
+| → | `scorecard/collect_to_share.py` | assembles `output/<site>/output_to_share/` |
 
-proning / sat / sbt are their own pipelines under `metrics/<id>/`; run their stages under the same
-`CLIF_SITE` when their data updates (first run builds a ~35-min waterfall, cached thereafter). The
-combiner just collects whatever feeds exist.
-
-### The scorecard is a combiner, not a place to add metric logic
-
-It is **registry-driven**: each metric is its own vertical that emits a PHI-free
-`tile_feed_<metric>.json` (spec: [`contract/tile_feed_contract.md`](contract/tile_feed_contract.md),
-schema: `contract/tile_feed.schema.json`). The combiner renders each through the **same tile
-component** (donut + up to 3 segments + optional goal bar + sparkline) and copies its detail dashboard
-into `output/<site>/dashboard/`. A coarse feed (e.g. proning is site-wide / all-time only) shows a
-**`· site-wide` / `· all-time` badge** when the global Unit/Week filters are finer than it provides,
-so a number is never silently mislabeled. A slot with no feed shows a **"Coming soon…"** placeholder.
-
-So adding a metric is: *build the vertical → emit a tile feed → add its id to the site's
-`enabled_metrics`* — no scorecard code change. See [`metrics/README.md`](metrics/README.md).
-
-Tile artwork is read from `assets/<LPV|SAT|SBT|Proning|Mobilization>.png` (embedded at build time);
-that folder is gitignored, and the scorecard **falls back to inline SVG icons** when absent — so a
-fresh clone still builds.
-
-### Recommended first: check your data
-
-Before trusting the dashboard, run the **data-quality probes** (aggregated summaries only — no
-patient rows), under your `CLIF_SITE`:
-
-```bash
-CLIF_SITE=<site> .venv/bin/python metrics/lpv/code/00_probe_missingness.py     # variable completeness for the IMV cohort
-CLIF_SITE=<site> .venv/bin/python metrics/lpv/code/01b_cohort_assessment.py    # cohort sanity checks (after step 1)
-CLIF_SITE=<site> .venv/bin/python metrics/lpv/code/02c_component_probe.py      # per-component assessability (after step 2)
-```
-
-Pay attention to **plateau-pressure completeness** and **height availability** — these drive how much
-of the cohort is assessable at your site.
+Proning / sat / sbt each follow a `01_build_cohort → 02_*_eligibility → 03_*_observation → 04_metrics →
+05_dashboard` shape and emit their own `tile_feed_<id>.json` + `metrics_site_summary.csv`.
 
 ---
 
-## Customizing the LPV analytic choices
+## Project structure
 
-The key parameters are named constants near the top of `metrics/lpv/code/02_features.py` (mirrored in
-`03`/`04`):
+```
+bundle_config.py        # site-aware config+output resolver: merges definitions/ ⊕ sites/<site>.json
+definitions/            # SHARED, versioned clinical spec — thresholds, category lists, definition_version
+  lpv.json  proning.json  sat.json  sbt.json
+sites/                  # per-site profiles (real ones gitignored; *.example.json committed)
+  uchicago.example.json  mimic.example.json
+requirements.txt        # one shared venv for the whole bundle
+run_bundle.sh / .ps1        # one-command build for a site (macOS/Linux / Windows)
+refresh_scorecard.sh / .ps1 # fast scorecard-only rebuild (no CLIF re-read)
+contract/               # the tile-feed spec + JSON Schema (the only thing the scorecard depends on)
+docs/                   # living methods/data-dictionary (build_methods.py + index + scorecard doc + portability report)
+metrics/                # one folder per QI vertical (see metrics/README.md)
+  lpv/      code/ ... METHODS.md   # reference metric: 01_cohort -> 04_dashboard + 05_tile_feed
+  proning/  code/ ... METHODS.md
+  sat/      code/ ... METHODS.md
+  sbt/      code/ ... METHODS.md
+scorecard/              # build_scorecard.py (combiner) + collect_to_share.py (deliverables assembler)
+output/<site>/          # per-site build artifacts (gitignored) — see "Where outputs land"
+  metrics/<id>/{intermediate,final}/ ...   # PHI/working space
+  dashboard/            # scorecard.html + drill-downs
+  output_to_share/      # PHI-free deliverables for the coordinating center
+```
+
+---
+
+## Definitions & provenance
+
+If someone asks *"how was the denominator for month X's SAT rate defined, and by which version of the
+code?"*, the answer is auditable:
+
+- **Shared definitions** (`definitions/<metric>.json`, above) carry a `definition_version`.
+- **Living methods docs** — [`docs/README.md`](docs/README.md) indexes one `metrics/<id>/METHODS.md` per
+  tile plus [`docs/scorecard_methods.md`](docs/scorecard_methods.md). Their facts blocks (thresholds,
+  drug/mode lists, current headline numbers) are **machine-stamped from `definitions/` + the tile feeds by
+  [`docs/build_methods.py`](docs/build_methods.py)** on every build, so docs never drift from code.
+- **Provenance block** — every `tile_feed_<metric>.json` (and the `output_to_share/manifest.json`) carries
+  `{site_id, code_version (git SHA), clif_version, definition_version, generated}`, so any scorecard number
+  traces to the exact code + definitions that produced it. Pooling across sites stays honest.
+- **Portability report** — [`docs/portability_mimic.md`](docs/portability_mimic.md) is a worked second-site
+  example (cohort sizes, cross-site rates, coverage diagnostics, the two inert fixes MIMIC required).
+
+---
+
+## The LPV bundle (reference metric)
+
+Three components, evaluated on **mode-eligible IMV time**, time-weighted within each patient-day (a day is
+"adherent" for a measure if ≥80% of its assessable time meets the threshold, with a ≥60-minute assessable
+floor):
+
+1. **Tidal volume** ≤ 6 mL/kg predicted body weight (PBW) — *cutoff adjustable in the dashboard (headline
+   tile uses ≤ 8)*
+2. **Plateau pressure** ≤ 30 cm H₂O — fixed
+3. **Driving pressure** (∆P = Plateau − PEEP) ≤ 15 cm H₂O — fixed
+
+Each is reported on **its own denominator** (plus a strict joint composite), because the components have
+very different missingness (Vt densely charted, plateau sparse). PBW uses the Devine/ARDSNet formula from
+`patient.sex_category` and `vitals.height_cm`. `lpv_dashboard.html` (~8 MB, Plotly inlined, offline) has
+tabs: Tidal Volume, Component breakdown, By unit & over time, Distributions & cohort.
+
+**Severity stratifier:** a "severe respiratory failure" filter (P/F < 300, or S/F surrogate < 315 at
+SpO₂ ≤ 97%, **and** PEEP > 5; worst oxygenation of the day) — not full Berlin ARDS. Thresholds are constants
+in `metrics/lpv/code/02d_severity.py`.
+
+### Customizing the LPV analytic choices
+
+Named constants near the top of `metrics/lpv/code/02_features.py` (mirrored in `03`/`04`):
 
 | Parameter | Default | Where |
 |---|---|---|
@@ -325,22 +280,71 @@ The key parameters are named constants near the top of `metrics/lpv/code/02_feat
 | Eligible ventilator modes | AC-VC, PRVC, SIMV, PC | `ELIGIBLE_MODES` |
 | Scorecard headline Vt cutoff / goal | 8 mL/kg / 90% | `SCORECARD_VT_CUTOFF`, `LPV_GOAL` (in `05_tile_feed.py`) |
 
-The **6-hour plateau carry-forward** reflects a Q4-shift plateau-charting cadence; widen it if your
-site charts plateau less often. Re-run `run_bundle.sh` after any change.
+### The scorecard is a combiner, not a place to add metric logic
+
+Registry-driven: each metric emits a PHI-free `tile_feed_<metric>.json` (spec:
+[`contract/tile_feed_contract.md`](contract/tile_feed_contract.md), schema:
+`contract/tile_feed.schema.json`); the combiner renders each through the same tile component and copies its
+drill-down into `output/<site>/dashboard/`. A coarse feed shows a `· site-wide` / `· all-time` badge when
+the global filters are finer than it provides. Adding a metric is: *build the vertical → emit a tile feed →
+add its id to the site's `enabled_metrics`* — no combiner code change. See
+[`metrics/README.md`](metrics/README.md). Tile artwork (`assets/`, gitignored) falls back to inline SVG when
+absent, so a fresh clone still builds.
+
+### Grouping ICUs by specific unit
+
+Every by-unit breakdown (`location_type` vs `location_name`) has a **"Group ICUs by"** toggle: ICU type
+(e.g. `medical_icu`) or specific unit (the physical `location_name`), computed nested within the type so
+type-level numbers never change. The toggle appears only when a `location_type` splits into multiple
+`location_name`s. Add a `unit_labels` map to your profile for friendly names.
+
+---
+
+## Onboarding a new site
+
+```bash
+# 1. clone + one shared venv
+git clone https://github.com/shanguleria/clif-ventilator-qi-dashboard.git && cd clif-ventilator-qi-dashboard
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+# 2. create the site profile (definitions/ stay shared and unchanged)
+cp sites/uchicago.example.json sites/site3.json         # set site_id, data_path, timezone, clif_version, enabled_metrics
+
+# 3. CONFIRM VOCABULARY before trusting numbers (aggregate summaries only — no patient rows)
+CLIF_SITE=site3 .venv/bin/python metrics/lpv/code/00_probe_missingness.py    # device/mode categories, plateau/height coverage
+CLIF_SITE=site3 .venv/bin/python metrics/sat/code/00_probe_documentation.py  # med_category drug inventory
+
+# 4. build all metrics
+CLIF_SITE=site3 ./run_bundle.sh                          # LPV + scorecard + methods + output_to_share
+for m in proning sat sbt; do for s in metrics/$m/code/0*.py; do CLIF_SITE=site3 .venv/bin/python "$s"; done; done
+CLIF_SITE=site3 ./refresh_scorecard.sh                   # recombine + re-assemble output_to_share
+
+open output/site3/dashboard/scorecard.html
+```
+
+(Windows: substitute `.\run_bundle.ps1 -Site site3` / `.\refresh_scorecard.ps1 -Site site3`, and
+`.venv\Scripts\python.exe` for the per-stage calls with `$env:CLIF_SITE="site3"` set.)
+
+**The one real caveat — vocabulary.** CLIF permissible values vary by site (casing, exact strings). If a
+site's categories differ from `definitions/`, a metric can silently under-count. Eyeball the probes and, if
+needed, add a `vocabulary_overrides` block to the profile. **Hard-failure gotchas:** clifpy needs files named
+`clif_<table>.parquet`; a very different `clif_version` can shift column names. `docs/portability_mimic.md`
+is a real worked example (MIMIC needed exactly two small, now-generalized fixes).
 
 ---
 
 ## Data safety
 
-- The pipelines read CLIF tables but **embed only aggregated values** (rates, counts, binned
-  histograms, per-period aggregated Table 1s) — **no patient-level rows**. Tile feeds carry only
-  `num`/`den` counts and are PHI-checked at build time.
-- `output/`, `sites/*.json`, `feeds/*.json`, and `assets/` are gitignored; nothing patient-adjacent
-  is committed.
-- Dashboards use real ICU **unit** labels (within-site). For audience-facing / consortium use, review
-  your consortium's anonymization expectations (per-site displays should use anonymized "Site N").
+- Pipelines read CLIF tables but **embed only aggregated values** (rates, counts, binned histograms,
+  per-period aggregated Table 1s) — no patient-level rows. Tile feeds carry only `num`/`den` counts and are
+  PHI-checked at build time and again when assembled into `output_to_share/`.
+- `output/`, `sites/*.json`, `feeds/*.json`, and `assets/` are gitignored; nothing patient-adjacent is
+  committed. The per-metric `output/<site>/metrics/…` parquet is the PHI/working space and is never placed
+  in `output_to_share/`.
+- Dashboards use real within-site ICU unit labels. For audience-facing / consortium use, review your
+  consortium's anonymization expectations (per-site displays should use anonymized "Site N").
 
 ## Acknowledgements
 
-Built on the [Common Longitudinal ICU Format (CLIF)](https://clif-consortium.github.io/website/) and
-the [`clifpy`](https://pypi.org/project/clifpy/) library. Licensed under MIT (see `LICENSE`).
+Built on the [Common Longitudinal ICU Format (CLIF)](https://clif-consortium.github.io/website/) and the
+[`clifpy`](https://pypi.org/project/clifpy/) library. Licensed under MIT (see `LICENSE`).

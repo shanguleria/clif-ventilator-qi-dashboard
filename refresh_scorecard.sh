@@ -49,7 +49,9 @@ echo ">>> site: $SITE  (output -> output/$SITE/)"
 "$PY" metrics/lpv/code/05_tile_feed.py    # re-emit the LPV feed from current parquets (no CLIF read)
 "$PY" scorecard/build_scorecard.py        # collect every metric feed + rebuild scorecard.html
 "$PY" docs/build_methods.py               # refresh the living methods docs from feeds + config
+"$PY" scorecard/collect_to_share.py       # assemble PHI-free deliverables -> output/<site>/output_to_share/
 
 echo ""
-echo "Done. Open the QI scorecard:  output/dashboard/scorecard.html"
+echo "Done. Open the QI scorecard:  output/$SITE/dashboard/scorecard.html"
 echo "  Methods docs refreshed under docs/ (index) + metrics/<id>/METHODS.md"
+echo "  Deliverables to share:       output/$SITE/output_to_share/"

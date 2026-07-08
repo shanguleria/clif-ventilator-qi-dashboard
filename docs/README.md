@@ -27,7 +27,7 @@ generated date). If the two ever disagree, the AUTOGEN block is authoritative an
 
 | Tile | Headline (all · all time) | Methods doc | Data generated |
 |---|---|---|---|
-| **LPV Adherence** | 61,305 / 73,739 = 83.1% | [`metrics/lpv/METHODS.md`](../metrics/lpv/METHODS.md) | 2026-07-07T17:24 |
+| **LPV Adherence** | 61,305 / 73,739 = 83.1% | [`metrics/lpv/METHODS.md`](../metrics/lpv/METHODS.md) | 2026-07-08T13:38 |
 | **ARDS Proning** | 350 / 1,854 = 18.9% | [`metrics/proning/METHODS.md`](../metrics/proning/METHODS.md) | 2026-07-07T17:26 |
 | **Spontaneous Awakening Trial** | 25,277 / 60,429 = 41.8% | [`metrics/sat/METHODS.md`](../metrics/sat/METHODS.md) | 2026-07-07T17:24 |
 | **Spontaneous Breathing Trial** | 8,706 / 34,439 = 25.3% | [`metrics/sbt/METHODS.md`](../metrics/sbt/METHODS.md) | 2026-07-07T17:24 |

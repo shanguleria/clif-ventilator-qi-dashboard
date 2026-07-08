@@ -58,6 +58,7 @@ steps=(
   "metrics/lpv/code/05_tile_feed.py"
   "scorecard/build_scorecard.py"
   "docs/build_methods.py"
+  "scorecard/collect_to_share.py"   # assemble PHI-free deliverables -> output/<site>/output_to_share/
 )
 
 for step in "${steps[@]}"; do
@@ -69,5 +70,6 @@ for step in "${steps[@]}"; do
 done
 
 echo ""
-echo "Done. Open the QI scorecard:  output/dashboard/scorecard.html"
-echo "  (the whole output/dashboard/ folder is the shippable bundle: scorecard + per-metric drill-downs)"
+echo "Done. Open the QI scorecard:  output/$SITE/dashboard/scorecard.html"
+echo "  (the whole output/$SITE/dashboard/ folder is the shippable bundle: scorecard + per-metric drill-downs)"
+echo "  Deliverables to share with the coordinating center:  output/$SITE/output_to_share/"
