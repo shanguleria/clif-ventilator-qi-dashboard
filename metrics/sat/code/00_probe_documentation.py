@@ -32,9 +32,15 @@ import duckdb
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = PROJECT_ROOT / "config.json"
+CONFIG_PATH = PROJECT_ROOT / "config.json"             # legacy; load_config now uses bundle_config
 FINAL_DIR = PROJECT_ROOT / "output" / "final"
 LOGS_DIR = PROJECT_ROOT / "output" / "logs"
+
+_BUNDLE_ROOT = Path(__file__).resolve().parents[3]     # repo root (holds bundle_config.py)
+import sys as _sys
+if str(_BUNDLE_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_BUNDLE_ROOT))
+import bundle_config as _bc                             # multi-site config + output resolver
 
 log = logging.getLogger("sat.probe")
 
@@ -56,9 +62,8 @@ def _ensure_dirs() -> None:
         d.mkdir(parents=True, exist_ok=True)
 
 
-def load_config(path: Path) -> dict:
-    with path.open() as f:
-        return json.load(f)
+def load_config(path: Path = CONFIG_PATH) -> dict:
+    return _bc.effective("sat", _bc.active_site())      # legacy path arg ignored; multi-site resolver
 
 
 def find_table(data_path: Path, table: str, fmt: str) -> str | None:

@@ -34,10 +34,13 @@ from clifpy.tables import Patient, Hospitalization, RespiratorySupport, Vitals
 # Config
 # ----------------------------------------------------------------------------
 
-ROOT = Path(__file__).resolve().parents[3]            # bundle root (shared config.json)
+ROOT = Path(__file__).resolve().parents[3]            # bundle root (holds bundle_config.py)
 _METRIC_ROOT = Path(__file__).resolve().parents[1]    # metrics/lpv (per-metric outputs)
-with open(ROOT / "config.json") as f:
-    CFG = json.load(f)
+import sys as _sys
+if str(ROOT) not in _sys.path:
+    _sys.path.insert(0, str(ROOT))
+import bundle_config as _bc                            # multi-site config + output resolver
+CFG = _bc.effective("lpv")                             # site = env CLIF_SITE (default uchicago)
 
 DATA_DIR = CFG["clif_data_path"]
 FILETYPE = CFG.get("filetype", "parquet")
