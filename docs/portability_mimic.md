@@ -80,7 +80,7 @@ crashing (MIMIC has `position`, so it ran — 3.16M rows, 8,425 `prone`).
 
 ```bash
 # one-time: create sites/mimic.json (copy sites/uchicago.example.json; set MIMIC path, timezone UTC,
-#           clif_version 1.1.0 — the MIMIC→CLIF conversion release, not a CLIF-format version)
+#           clif_version 2.1.0 — the CLIF SPEC version; record the MIMIC→CLIF conversion release as dataset_version 1.1.0)
 CLIF_SITE=mimic ./run_bundle.sh          # LPV + scorecard; or run each vertical's stages
 # proning/sat/sbt build their own ~35-min waterfall on first run (cached thereafter under output/mimic/.../_cache)
 CLIF_SITE=mimic python scorecard/build_scorecard.py
