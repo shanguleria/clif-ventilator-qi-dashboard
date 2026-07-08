@@ -552,9 +552,12 @@ for f in feeds:
         f.get("detail_href") is None or (DASH_DIR / f["detail_href"]).exists())
 if "lpv" in feeds_by_id:
     lf = feeds_by_id["lpv"]
-    checks["lpv Vt headline ~ 83%"] = 0.78 < feed_rate(lf, "vt8") < 0.88
-    checks["lpv Plateau ~ 85.8%"] = 0.83 < feed_rate(lf, "plat") < 0.89
-    checks["lpv dP ~ 48%"] = 0.44 < feed_rate(lf, "dp") < 0.52
+    _vt = feed_rate(lf, "vt8")
+    checks["lpv Vt headline in (0,1]"] = 0 < _vt <= 1     # generic sanity — all sites
+    if _SITE_ID == "uchicago":                            # UChicago-specific regression guards
+        checks["lpv Vt headline ~ 83%"] = 0.78 < _vt < 0.88
+        checks["lpv Plateau ~ 85.8%"] = 0.83 < feed_rate(lf, "plat") < 0.89
+        checks["lpv dP ~ 48%"] = 0.44 < feed_rate(lf, "dp") < 0.52
 if "proning" in feeds_by_id:
     hc = feeds_by_id["proning"]["headline"]["cells"]["__ALL__"]["all"]
     checks["proning feed: 0 <= num <= den, den>0"] = 0 <= hc["num"] <= hc["den"] and hc["den"] > 0

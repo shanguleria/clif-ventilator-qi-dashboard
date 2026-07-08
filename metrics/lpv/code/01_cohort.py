@@ -63,12 +63,23 @@ admit_col = next(
     c for c in ("admission_dttm", "admit_dttm", "hospital_admission_dttm") if c in hosp_df.columns
 )
 
-hosp_age = hosp_df[["hospitalization_id", "patient_id", admit_col]].merge(
+_hosp_cols = ["hospitalization_id", "patient_id", admit_col]
+if "age_at_admission" in hosp_df.columns:
+    _hosp_cols.append("age_at_admission")
+hosp_age = hosp_df[_hosp_cols].merge(
     pt_df[["patient_id", "birth_date", "sex_category"]], on="patient_id", how="left"
 )
-hosp_age[admit_col] = pd.to_datetime(hosp_age[admit_col])
-hosp_age["birth_date"] = pd.to_datetime(hosp_age["birth_date"])
-hosp_age["age_at_admit"] = (hosp_age[admit_col] - hosp_age["birth_date"]).dt.days / 365.25
+# Adult filter uses the CLIF-canonical `age_at_admission` (fully populated across sites; the other
+# verticals use it too — at UChicago it gives the identical adult set as admit - birth). Fall back to
+# admit - birth only if that column is absent, normalizing BOTH to tz-naive first (sites differ in
+# whether birth_date carries a tz; MIMIC's birth_date is null, so age_at_admission is required there).
+if "age_at_admission" in hosp_age.columns:
+    hosp_age["age_at_admit"] = pd.to_numeric(hosp_age["age_at_admission"], errors="coerce")
+else:
+    def _tz_naive(s):
+        s = pd.to_datetime(s)
+        return s.dt.tz_localize(None) if getattr(s.dt, "tz", None) is not None else s
+    hosp_age["age_at_admit"] = (_tz_naive(hosp_age[admit_col]) - _tz_naive(hosp_age["birth_date"])).dt.days / 365.25
 hosp_age["hospitalization_id"] = hosp_age["hospitalization_id"].astype(str)
 
 adult_mask = hosp_age["age_at_admit"] >= 18
