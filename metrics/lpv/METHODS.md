@@ -30,6 +30,16 @@ denominator):
 - **Plateau pressure** — manually obtained, expected sparse.
 - **Driving pressure** (∆P = plateau − PEEP) — limited by plateau availability.
 
+**Two rates are reported** (`code/03_aggregate.py`), and the drill-down shows both:
+- **Assessable rate** = adherent ÷ **assessable** patient-days — the tile **headline**; "of the days we
+  could evaluate, how often was ventilation lung-protective."
+- **Crude adherence** = adherent ÷ **all** cohort patient-days (`n_total`) — not-assessable days stay in
+  the denominator. "Credit only when documented, counted over every vent-ICU day."
+
+The gap between them **is the measure's charting missingness**: large for sparsely-charted plateau/∆P
+(few days assessable, so crude ≪ assessable), ≈0 for densely-charted tidal volume (crude ≈ assessable).
+The headline uses the assessable rate; crude is the conservative companion.
+
 **Predicted body weight (PBW, Devine/ARDSNet):** male 50 + 2.3·(height_in − 60), female 45.5 + 2.3·
 (height_in − 60); height from `vitals` (`height_cm`, median per patient), converted to inches.
 
