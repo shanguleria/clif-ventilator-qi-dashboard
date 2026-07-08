@@ -49,6 +49,11 @@ if [[ ! -f "sites/$SITE.json" ]]; then
 fi
 echo ">>> site: $SITE  (output -> output/$SITE/)"
 
+_START_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo NA)"
+_fmt_hms(){ printf '%dh%02dm%02ds' $(($1/3600)) $((($1%3600)/60)) $(($1%60)); }
+_T0=$SECONDS
+
 steps=(
   "metrics/lpv/code/01_cohort.py"
   "metrics/lpv/code/02_features.py"
@@ -69,7 +74,20 @@ for step in "${steps[@]}"; do
   "$PY" "$step"
 done
 
+_ELAPSED=$((SECONDS-_T0))
+
+# Timing -> output/<site>/run_timings.csv (long format: one row per phase, per runner). run_site.sh
+# sets TIMING_SUPPRESS when it calls this (it logs the lpv_bundle phase itself, to avoid a double row).
+if [[ -z "${TIMING_SUPPRESS:-}" ]]; then
+  _CSV="output/$SITE/run_timings.csv"
+  [[ -f "$_CSV" ]] || echo "run_started_utc,site,runner,phase,seconds,hms,git_sha" > "$_CSV"
+  echo "$_START_UTC,$SITE,run_bundle,lpv_bundle,$_ELAPSED,$(_fmt_hms "$_ELAPSED"),$_SHA" >> "$_CSV"
+fi
+
 echo ""
-echo "Done. Open the QI scorecard:  output/$SITE/dashboard/scorecard.html"
+echo "Done in $(_fmt_hms "$_ELAPSED").  Open the QI scorecard:  output/$SITE/dashboard/scorecard.html"
 echo "  (the whole output/$SITE/dashboard/ folder is the shippable bundle: scorecard + per-metric drill-downs)"
 echo "  Deliverables to share with the coordinating center:  output/$SITE/output_to_share/"
+if [[ -z "${TIMING_SUPPRESS:-}" ]]; then
+  echo "  Timing logged -> output/$SITE/run_timings.csv"
+fi

@@ -1,8 +1,8 @@
 <#
 run_site.ps1 - Windows (PowerShell) equivalent of run_site.sh: FULL multi-metric build for one site,
 TIMED end-to-end. Phases: LPV pipeline + scorecard (run_bundle.ps1) -> proning -> sat -> sbt ->
-recombine (refresh_scorecard.ps1). Records per-phase + total wall-clock to
-output/<site>/run_timings.csv (one row per run) and prints a summary.
+recombine (refresh_scorecard.ps1). Appends one row PER PHASE to output/<site>/run_timings.csv as each
+phase finishes (long format), so an interrupted run keeps whatever completed. Prints a summary.
 
 Usage:
   .\run_site.ps1 -Site <id>              # or set $env:CLIF_SITE first
@@ -12,6 +12,7 @@ param([string]$Site = $(if ($env:CLIF_SITE) { $env:CLIF_SITE } else { "uchicago"
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
 $env:CLIF_SITE = $Site
+$env:TIMING_SUPPRESS = "1"   # run_site owns timing; stop run_bundle from logging its own duplicate row
 
 $PY = Join-Path ".venv" "Scripts\python.exe"
 if (-not (Test-Path $PY)) {
@@ -27,7 +28,7 @@ $out = "output\$Site"
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 $csv = Join-Path $out "run_timings.csv"
 if (-not (Test-Path $csv)) {
-    "run_started_utc,lpv_bundle_s,proning_s,sat_s,sbt_s,refresh_s,total_s,total_hms,git_sha" | Out-File -FilePath $csv -Encoding utf8
+    "run_started_utc,site,runner,phase,seconds,hms,git_sha" | Out-File -FilePath $csv -Encoding utf8
 }
 
 $startUtc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
@@ -42,25 +43,26 @@ function Time-Phase([string]$name, [scriptblock]$block) {
     if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: phase '$name' failed (exit $LASTEXITCODE)"; exit $LASTEXITCODE }
     $sw.Stop(); $d = [int]$sw.Elapsed.TotalSeconds
     $script:names += $name; $script:secs += $d
-    Write-Host (">>> {0}: {1}" -f $name, (Fmt $d))
+    ("{0},{1},run_site,{2},{3},{4},{5}" -f $startUtc, $Site, $name, $d, (Fmt $d), $sha) | Out-File -FilePath $csv -Append -Encoding utf8
+    Write-Host (">>> {0}: {1}   (logged -> {2})" -f $name, (Fmt $d), $csv)
 }
 function Run-Vertical([string]$m) {
     Get-ChildItem "metrics\$m\code\0*.py" | ForEach-Object { & $PY $_.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
 }
 
-Write-Host ">>> full timed run - site: $Site  (output -> $out/)"
+Write-Host ">>> full timed run - site: $Site   output -> $out/   timing -> $csv"
 $swTotal = [System.Diagnostics.Stopwatch]::StartNew()
-Time-Phase "LPV+scorecard" { .\run_bundle.ps1 -Site $Site }
-Time-Phase "proning"       { Run-Vertical proning }
-Time-Phase "sat"           { Run-Vertical sat }
-Time-Phase "sbt"           { Run-Vertical sbt }
-Time-Phase "refresh"       { .\refresh_scorecard.ps1 -Site $Site }
+Time-Phase "lpv_bundle" { .\run_bundle.ps1 -Site $Site }
+Time-Phase "proning"    { Run-Vertical proning }
+Time-Phase "sat"        { Run-Vertical sat }
+Time-Phase "sbt"        { Run-Vertical sbt }
+Time-Phase "refresh"    { .\refresh_scorecard.ps1 -Site $Site }
 $swTotal.Stop(); $total = [int]$swTotal.Elapsed.TotalSeconds
+("{0},{1},run_site,TOTAL,{2},{3},{4}" -f $startUtc, $Site, $total, (Fmt $total), $sha) | Out-File -FilePath $csv -Append -Encoding utf8
 
 Write-Host ""
 Write-Host "=================== timing (site: $Site) ==================="
-for ($i = 0; $i -lt $names.Count; $i++) { "  {0,-14} {1}" -f $names[$i], (Fmt $secs[$i]) | Write-Host }
-"  {0,-14} {1}" -f "TOTAL", (Fmt $total) | Write-Host
-("{0},{1},{2},{3},{4},{5},{6},{7},{8}" -f $startUtc, $secs[0], $secs[1], $secs[2], $secs[3], $secs[4], $total, (Fmt $total), $sha) | Out-File -FilePath $csv -Append -Encoding utf8
-Write-Host "  logged -> $csv"
+for ($i = 0; $i -lt $names.Count; $i++) { "  {0,-12} {1}" -f $names[$i], (Fmt $secs[$i]) | Write-Host }
+"  {0,-12} {1}" -f "TOTAL", (Fmt $total) | Write-Host
+Write-Host "  logged -> $csv   (one row per phase; open it to compare cold vs warm runs)"
 Write-Host "  scorecard -> $out\dashboard\scorecard.html   |   deliverables -> $out\output_to_share\"

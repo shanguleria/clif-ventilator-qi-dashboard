@@ -129,8 +129,11 @@ Everything a run produces is namespaced under **`output/<site>/`** (entirely git
 
 `output_to_share/` is assembled by `scorecard/collect_to_share.py` (run automatically at the end of the
 runners). The feeds in it are re-checked for `hospitalization_id`/`patient_id` and the build aborts if a
-row-level id ever appears. A `run_site.sh` run also writes **`output/<site>/run_timings.csv`** — per-phase
-+ total wall-clock, one row per run (for reporting how long a site takes, cold vs. warm cache).
+row-level id ever appears. Both runners also write **`output/<site>/run_timings.csv`** (long format:
+`run_started_utc, site, runner, phase, seconds, hms, git_sha`) — `run_bundle` logs a single `lpv_bundle`
+row; `run_site` appends one row per phase (`lpv_bundle`/`proning`/`sat`/`sbt`/`refresh`) plus a `TOTAL`,
+**as each phase finishes** (so an interrupted run keeps what completed). Use it to report how long a site
+takes, cold vs. warm cache.
 
 ---
 
@@ -156,8 +159,9 @@ row-level id ever appears. A `run_site.sh` run also writes **`output/<site>/run_
 ## Running the pipeline
 
 **Full timed build of all four metrics (recommended):** `run_site.sh` runs LPV + proning + sat + sbt +
-scorecard end-to-end, **times each phase**, and appends per-phase + total wall-clock to
-`output/<site>/run_timings.csv` (one row per run, so cold vs. warm-cache runs accumulate).
+scorecard end-to-end, **times each phase**, and appends a row per phase (plus a `TOTAL`) to
+`output/<site>/run_timings.csv` as each finishes. (`run_bundle.sh` alone logs just its own `lpv_bundle`
+row + prints its elapsed — so even the LPV-only build records its time.)
 
 ```bash
 ./run_site.sh --site <site>              # macOS/Linux   (Windows: .\run_site.ps1 -Site <site>)

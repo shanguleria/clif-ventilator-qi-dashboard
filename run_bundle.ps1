@@ -34,6 +34,11 @@ if (-not (Test-Path "sites\$Site.json")) {
 }
 Write-Host ">>> site: $Site  (output -> output/$Site/)"
 
+$startUtc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+try { $sha = (git rev-parse --short HEAD).Trim() } catch { $sha = "NA" }
+function Fmt([int]$s) { "{0}h{1:d2}m{2:d2}s" -f [int]($s/3600), [int](($s%3600)/60), ($s%60) }
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
+
 $steps = @(
     "metrics/lpv/code/01_cohort.py",
     "metrics/lpv/code/02_features.py",
@@ -58,7 +63,18 @@ foreach ($step in $steps) {
     }
 }
 
+$sw.Stop(); $elapsed = [int]$sw.Elapsed.TotalSeconds
+
+# Timing -> output/<site>/run_timings.csv (long format). run_site.ps1 sets $env:TIMING_SUPPRESS.
+if (-not $env:TIMING_SUPPRESS) {
+    New-Item -ItemType Directory -Force -Path "output\$Site" | Out-Null
+    $csv = "output\$Site\run_timings.csv"
+    if (-not (Test-Path $csv)) { "run_started_utc,site,runner,phase,seconds,hms,git_sha" | Out-File -FilePath $csv -Encoding utf8 }
+    ("{0},{1},run_bundle,lpv_bundle,{2},{3},{4}" -f $startUtc, $Site, $elapsed, (Fmt $elapsed), $sha) | Out-File -FilePath $csv -Append -Encoding utf8
+}
+
 Write-Host ""
-Write-Host "Done. Open the QI scorecard:  output/$Site/dashboard/scorecard.html"
+Write-Host ("Done in {0}.  Open the QI scorecard:  output/$Site/dashboard/scorecard.html" -f (Fmt $elapsed))
 Write-Host "  (the whole output/$Site/dashboard/ folder is the shippable bundle: scorecard + per-metric drill-downs)"
 Write-Host "  Deliverables to share with the coordinating center:  output/$Site/output_to_share/"
+if (-not $env:TIMING_SUPPRESS) { Write-Host "  Timing logged -> output/$Site/run_timings.csv" }

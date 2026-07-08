@@ -32,36 +32,44 @@ PY=".venv/bin/python"
 [[ -x "$PY" ]] || { echo "ERROR: $PY not found — create the venv: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"; exit 1; }
 [[ -f "sites/$SITE.json" ]] || { echo "ERROR: sites/$SITE.json not found (copy sites/uchicago.example.json)"; exit 1; }
 
+export TIMING_SUPPRESS=1   # run_site owns timing; stop run_bundle from logging its own duplicate row
+
 OUT="output/$SITE"; mkdir -p "$OUT"
 CSV="$OUT/run_timings.csv"
-[[ -f "$CSV" ]] || echo "run_started_utc,lpv_bundle_s,proning_s,sat_s,sbt_s,refresh_s,total_s,total_hms,git_sha" > "$CSV"
+[[ -f "$CSV" ]] || echo "run_started_utc,site,runner,phase,seconds,hms,git_sha" > "$CSV"
 
 START_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SHA="$(git rev-parse --short HEAD 2>/dev/null || echo NA)"
 fmt(){ printf '%dh%02dm%02ds' $(($1/3600)) $((($1%3600)/60)) $(($1%60)); }
 
-# bash 3.2-safe (macOS): parallel indexed arrays, no associative arrays.
+# bash 3.2-safe (macOS): parallel indexed arrays. Each phase is appended to the CSV the moment it
+# finishes (long format), so an interrupted run still keeps whatever phases completed.
 NAMES=(); SECS=()
-time_phase(){ local name="$1"; shift; echo ""; echo "========== $name =========="; local t0=$SECONDS; "$@"; local d=$((SECONDS-t0)); NAMES+=("$name"); SECS+=("$d"); echo ">>> $name: $(fmt "$d")"; }
+time_phase(){
+  local name="$1"; shift
+  echo ""; echo "========== $name =========="
+  local t0=$SECONDS
+  "$@"
+  local d=$((SECONDS-t0))
+  NAMES+=("$name"); SECS+=("$d")
+  echo "$START_UTC,$SITE,run_site,$name,$d,$(fmt "$d"),$SHA" >> "$CSV"
+  echo ">>> $name: $(fmt "$d")   (logged -> $CSV)"
+}
 vertical(){ local m="$1"; for s in metrics/"$m"/code/0*.py; do "$PY" "$s"; done; }
 
-echo ">>> full timed run — site: $SITE  (output -> $OUT/)"
+echo ">>> full timed run — site: $SITE   output -> $OUT/   timing -> $CSV"
 T0=$SECONDS
-time_phase "LPV+scorecard" ./run_bundle.sh --site "$SITE"
-time_phase "proning"       vertical proning
-time_phase "sat"           vertical sat
-time_phase "sbt"           vertical sbt
-time_phase "refresh"       ./refresh_scorecard.sh --site "$SITE"
+time_phase "lpv_bundle" ./run_bundle.sh --site "$SITE"
+time_phase "proning"    vertical proning
+time_phase "sat"        vertical sat
+time_phase "sbt"        vertical sbt
+time_phase "refresh"    ./refresh_scorecard.sh --site "$SITE"
 TOTAL=$((SECONDS-T0))
+echo "$START_UTC,$SITE,run_site,TOTAL,$TOTAL,$(fmt "$TOTAL"),$SHA" >> "$CSV"
 
-row=""
 echo ""
 echo "=================== timing (site: $SITE) ==================="
-for i in "${!NAMES[@]}"; do
-  printf '  %-14s %s\n' "${NAMES[$i]}" "$(fmt "${SECS[$i]}")"
-  row="$row,${SECS[$i]}"
-done
-printf '  %-14s %s\n' "TOTAL" "$(fmt "$TOTAL")"
-echo "$START_UTC$row,$TOTAL,$(fmt "$TOTAL"),$SHA" >> "$CSV"
-echo "  logged -> $CSV"
+for i in "${!NAMES[@]}"; do printf '  %-12s %s\n' "${NAMES[$i]}" "$(fmt "${SECS[$i]}")"; done
+printf '  %-12s %s\n' "TOTAL" "$(fmt "$TOTAL")"
+echo "  logged -> $CSV   (one row per phase; open it to compare cold vs warm runs)"
 echo "  scorecard -> $OUT/dashboard/scorecard.html   |   deliverables -> $OUT/output_to_share/"
