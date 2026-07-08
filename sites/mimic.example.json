@@ -1,5 +1,5 @@
 {
-  "_comment": "Example profile for MIMIC-IV CLIF (MIMIC-IV-Ext-CLIF, ~v1.1.0). Copy to sites/mimic.json (gitignored) and set data_path to your local MIMIC CLIF directory. Run: ./run_bundle.sh --site mimic. NOTE timezone UTC — MIMIC *_dttm are UTC and date-shifted, so temporal-trend axes are not real calendar dates (all-time/distributional comparisons are valid). All 4 metrics run as-is; vocabulary matches the canonical definitions/ with no overrides.",
+  "_comment": "Example profile for MIMIC-IV-Ext-CLIF — the MIMIC->CLIF conversion, release v1.1.0, which implements the CLIF 2.x spec. NOTE: the clif_version field below records that CONVERSION RELEASE (1.1.0), which is a dataset/ETL version, NOT a CLIF-format version (there is no 'CLIF 1.1.0'). Copy to sites/mimic.json (gitignored) and set data_path to your local MIMIC-IV-Ext-CLIF directory. Run: ./run_bundle.sh --site mimic. NOTE timezone UTC — MIMIC *_dttm are UTC and date-shifted, so temporal-trend axes are not real calendar dates (all-time/distributional comparisons are valid). All 4 metrics run as-is; vocabulary matches the canonical definitions/ with no overrides.",
   "site_id": "MIMIC",
   "dataset_name": "MIMIC_IV_CLIF",
   "data_path": "/path/to/your/MIMIC_IV_CLIF/1.1.0",

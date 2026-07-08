@@ -9,7 +9,7 @@ emits a small, PHI-free **tile feed**; the scorecard is a combiner that collects
 **multi-site** — any CLIF site clones the repo, adds a per-site profile, and runs one command to produce
 its own scorecard and a PHI-free deliverables folder under `output/<site>/`.
 
-![CLIF](https://img.shields.io/badge/CLIF-2.x%20(1.1.0%20validated)-blue) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![CLIF](https://img.shields.io/badge/CLIF-2.x-blue) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -28,14 +28,14 @@ eligible encounter), broken down by ICU unit and over time:
 
 Mobilization is a placeholder tile. The pipeline covers cohort derivation, per-patient-day/-encounter
 feature construction, rule application, and unit × time aggregation. It has run end-to-end on two
-independent CLIF sites (UChicago v2.1.0, MIMIC-IV CLIF v1.1.0 — see
-[`docs/portability_mimic.md`](docs/portability_mimic.md)).
+independent CLIF sites (UChicago on CLIF 2.1.0, and MIMIC-IV-Ext-CLIF — the MIMIC→CLIF conversion,
+release v1.1.0, which implements the CLIF 2.x spec — see [`docs/portability_mimic.md`](docs/portability_mimic.md)).
 
 ---
 
 ## Required CLIF tables and fields
 
-**CLIF 2.x** (validated also on a 1.1.0 dataset), read via [`clifpy`](https://pypi.org/project/clifpy/)
+**CLIF 2.x** (also validated on MIMIC-IV-Ext-CLIF, the MIMIC→CLIF conversion release v1.1.0), read via [`clifpy`](https://pypi.org/project/clifpy/)
 as the `file_format` in the site profile (default `parquet`, files named `clif_<table>.parquet`). Standard
 CLIF mCIDE category values are assumed; outlier handling uses clifpy's built-in ranges. All four metrics
 process `respiratory_support` through clifpy's waterfall (so `device_category` casing is normalized) and

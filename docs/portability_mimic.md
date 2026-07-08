@@ -1,13 +1,14 @@
-# Portability validation — MIMIC-IV CLIF (second-site test)
+# Portability validation — MIMIC-IV-Ext-CLIF (second-site test)
 
-**Result: the QI bundle ran end-to-end on a second, independent CLIF site (MIMIC-IV CLIF v1.1.0),
+**Result: the QI bundle ran end-to-end on a second, independent CLIF site (MIMIC-IV-Ext-CLIF, the MIMIC→CLIF conversion release v1.1.0),
 producing all four metric tiles with only two small, inert code fixes.** This validates the
 multi-site architecture (`bundle_config.py` + `definitions/` + `sites/<site>.json` → `output/<site>/`)
 and de-risks consortium recruitment: a new site is a new `sites/<site>.json` profile plus, at most, a
 handful of vocabulary/robustness fixes.
 
-Run date: 2026-07-08. Home site: UChicago (CLIF v2.1.0). Validation site: MIMIC-IV CLIF v1.1.0
-(MIMIC-IV-Ext-CLIF, derived from MIMIC-IV v3.1).
+Run date: 2026-07-08. Home site: UChicago (CLIF 2.1.0). Validation site: MIMIC-IV-Ext-CLIF — the
+MIMIC→CLIF *conversion*, release v1.1.0 (derived from MIMIC-IV v3.1), which implements the CLIF 2.x spec.
+("1.1.0" is the conversion/dataset release version, **not** a CLIF-format version — there is no CLIF 1.1.0.)
 
 ## Cross-site headline rates
 
@@ -78,7 +79,8 @@ crashing (MIMIC has `position`, so it ran — 3.16M rows, 8,425 `prone`).
 ## How to reproduce
 
 ```bash
-# one-time: create sites/mimic.json (copy sites/uchicago.example.json; set MIMIC path, timezone UTC, clif_version 1.1.0)
+# one-time: create sites/mimic.json (copy sites/uchicago.example.json; set MIMIC path, timezone UTC,
+#           clif_version 1.1.0 — the MIMIC→CLIF conversion release, not a CLIF-format version)
 CLIF_SITE=mimic ./run_bundle.sh          # LPV + scorecard; or run each vertical's stages
 # proning/sat/sbt build their own ~35-min waterfall on first run (cached thereafter under output/mimic/.../_cache)
 CLIF_SITE=mimic python scorecard/build_scorecard.py
