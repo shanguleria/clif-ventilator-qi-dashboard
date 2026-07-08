@@ -1,11 +1,20 @@
 # One shared environment for the whole bundle: the LPV pipeline + the scorecard combiner +
-# every folded-in metric (proning, sat, ...). Union of each metric's needs (highest pin wins).
-clifpy>=0.4.9
-pandas>=2.2
-numpy>=1.26
-pyarrow>=15.0
-duckdb>=0.10
-scipy>=1.12
+# every folded-in metric (proning, sat, sbt).
+#
+# The COMPUTE STACK is PINNED to exact validated versions for cross-site reproducibility — every
+# site must compute identical numbers. clifpy in particular governs how CLIF *_dttm columns are
+# localized: 0.5.0 changed that behavior and produced "cannot subtract tz-naive and tz-aware"
+# errors at sites that installed later. All validation (UChicago, MIMIC) was on the versions below.
+# Bump these deliberately (re-validate that numbers don't move), never via an unpinned `>=` floor.
+clifpy==0.4.9
+pandas==3.0.3
+numpy==2.4.6
+pyarrow==24.0.0
+duckdb==1.5.3
+scipy==1.17.1
+
+# Presentation / utility libraries — do not affect computed metrics, so floored (not pinned) to
+# ease installs. Safe to let these float.
 matplotlib>=3.8
 seaborn>=0.13
 plotly>=5.0

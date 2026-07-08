@@ -9,7 +9,7 @@ emits a small, PHI-free **tile feed**; the scorecard is a combiner that collects
 **multi-site** — any CLIF site clones the repo, adds a per-site profile, and runs one command to produce
 its own scorecard and a PHI-free deliverables folder under `output/<site>/`.
 
-![CLIF](https://img.shields.io/badge/CLIF-2.x-blue) ![python](https://img.shields.io/badge/python-3.10%2B-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![CLIF](https://img.shields.io/badge/CLIF-2.x-blue) ![python](https://img.shields.io/badge/python-3.11%2B-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -135,7 +135,7 @@ row-level id ever appears.
 
 ## Prerequisites
 
-- **Python 3.10+** (`python3 --version`). No R required.
+- **Python 3.11+** (`python3 --version`; required by the pinned `pandas` 3.0). No R required.
 - One shared virtualenv for the whole bundle:
 
   ```bash
@@ -143,8 +143,11 @@ row-level id ever appears.
   .venv/bin/pip install -r requirements.txt        # Windows: .venv\Scripts\python.exe -m pip install -r requirements.txt
   ```
 
-  Key dependency: [`clifpy`](https://pypi.org/project/clifpy/) (CLIF loading + respiratory-support
-  waterfall); plus pandas, duckdb, plotly, matplotlib.
+  The **compute stack is pinned** to validated versions in `requirements.txt` so every site computes
+  identical numbers — notably [`clifpy`](https://pypi.org/project/clifpy/)`==0.4.9` (it loads CLIF tables
+  + runs the respiratory-support waterfall; **later releases changed CLIF datetime tz-handling and break
+  the pipeline** with "cannot subtract tz-naive and tz-aware" errors), plus pinned `pandas`/`numpy`/
+  `pyarrow`/`duckdb`/`scipy`. Presentation libraries (plotly, matplotlib, …) are floored, not pinned.
 - Your CLIF tables as `clif_<table>.parquet` at the profile's `data_path`.
 
 ---
