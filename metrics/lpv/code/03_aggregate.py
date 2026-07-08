@@ -42,7 +42,11 @@ OUT_DIR = Path(CFG.get("output_path", _METRIC_ROOT / "output"))
 ADHERENCE_FRACTION = 0.80
 MIN_ASSESSABLE_MIN = 60
 PLATEAU_MAX, DP_MAX = 30.0, 15.0
-VT_DEFAULT = 6.0
+# Dashboard Vt-slider INITIAL position (published as params.vt_default). Set to 8.0 to match the
+# scorecard headline cutoff (SCORECARD_VT_CUTOFF in 05_tile_feed.py). Presentational only — the grid
+# below holds every cutoff, so the slider can still move to 6.0 (ARDSNet); the stored per-day status
+# is classified at VT_MAX_DEFAULT (6.0) in 02_features.py, independent of this.
+VT_DEFAULT = 8.0
 VT_GRID = [4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0, 7.5, 8.0, 8.5, 9.0, 10.0]
 MEASURES = ["vt", "plat", "dp", "comp"]
 ALL = "__ALL__"

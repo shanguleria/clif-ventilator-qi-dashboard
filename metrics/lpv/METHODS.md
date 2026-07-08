@@ -48,8 +48,10 @@ The headline uses the assessable rate; crude is the conservative companion.
 ## 5. Numerator — adherent time
 A patient-day is **adherent** for a measure when the fraction of assessable time within threshold is ≥
 `ADHERENCE_FRACTION`. Thresholds:
-- **Tidal volume** — headline uses ≤ `SCORECARD_VT_CUTOFF` mL/kg PBW (the scorecard tile). The
-  per-dashboard pipeline default is ≤ `VT_MAX_DEFAULT` (a slider; "less negotiable" plateau/∆P are fixed).
+- **Tidal volume** — headline uses ≤ `SCORECARD_VT_CUTOFF` mL/kg PBW (the scorecard tile). The drill-down
+  dashboard exposes a **Vt-cutoff slider** that opens at ≤ `VT_DEFAULT` (= `SCORECARD_VT_CUTOFF`, so the
+  dashboard lands on the scorecard's number) and slides across the full grid down to the ARDSNet ≤ 6; the
+  stored per-day adherent status is classified at ≤ `VT_MAX_DEFAULT` (6). Plateau/∆P are fixed.
 - **Plateau pressure** ≤ `PLATEAU_MAX` cmH₂O.
 - **Driving pressure** ≤ `DP_MAX` cmH₂O.
 - **Vt-in-severe** — Vt ≤ cutoff restricted to severe respiratory failure (P/F ≤ `PF_THRESHOLD`, or an
@@ -97,7 +99,7 @@ below rather than silently disappearing.
 
 **Segments reported:** Plateau ≤ 30, ∆P ≤ 15, Vt ≤ 8 · severe
 
-**Definitional constants** (LPV has no `config.json`; scraped from the pipeline code — the tile headline uses Vt ≤ `SCORECARD_VT_CUTOFF`, the pipeline default is Vt ≤ `VT_MAX_DEFAULT`):
+**Definitional constants** (LPV has no `config.json`; scraped from the pipeline code — the tile headline and the dashboard Vt-slider both open at Vt ≤ `SCORECARD_VT_CUTOFF` (= `VT_DEFAULT`); the stored per-day adherent status is classified at Vt ≤ `VT_MAX_DEFAULT`):
 
 | Constant | Value | Source |
 |---|---|---|
@@ -110,6 +112,7 @@ below rather than silently disappearing.
 | SPO2_MAX_FOR_SF | 97.0 | `metrics/lpv/code/02d_severity.py` |
 | PEEP_MIN | 5.0 | `metrics/lpv/code/02d_severity.py` |
 | O2_FIO2_LOOKBACK | pd.Timedelta(hours=4) | `metrics/lpv/code/02d_severity.py` |
+| VT_DEFAULT | 8.0 | `metrics/lpv/code/03_aggregate.py` |
 | SCORECARD_VT_CUTOFF | 8.0 | `metrics/lpv/code/05_tile_feed.py` |
 | LPV_GOAL | 0.90 | `metrics/lpv/code/05_tile_feed.py` |
 | DEFINITION_VERSION | lpv-v1 | `metrics/lpv/code/05_tile_feed.py` |

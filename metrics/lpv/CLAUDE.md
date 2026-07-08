@@ -16,7 +16,7 @@ This is descriptive epidemiology only. Outcome modeling (mortality, VFD-28, etc.
   1. Tidal volume **≤ 6 mL/kg predicted body weight (PBW)**
   2. Plateau pressure **≤ 30 cm H₂O**
   3. Driving pressure (∆P = Plateau − PEEP) **≤ 15 cm H₂O**
-  - **As of 2026-06-01 these are reported COMPONENT-SEPARATED — each on its own denominator — not only as a single all-three composite** (the components have very different missingness; a lone composite forces densely-charted Vt to share sparse plateau's denominator). The composite is still computed alongside. The **Vt/kg cutoff is a dashboard slider** (default 6); plateau ≤ 30 and ∆P ≤ 15 are fixed ("less negotiable"). See `plans/01_design.md` §4a for the locked design and `code/02_features.py` for the four-measure implementation.
+  - **As of 2026-06-01 these are reported COMPONENT-SEPARATED — each on its own denominator — not only as a single all-three composite** (the components have very different missingness; a lone composite forces densely-charted Vt to share sparse plateau's denominator). The composite is still computed alongside. The **Vt/kg cutoff is a dashboard slider** (default 8, matching the scorecard headline `SCORECARD_VT_CUTOFF`; slide to 6 for the ARDSNet target — the initial position is `VT_DEFAULT` in `code/03_aggregate.py`, presentational only); plateau ≤ 30 and ∆P ≤ 15 are fixed ("less negotiable"). See `plans/01_design.md` §4a for the locked design and `code/02_features.py` for the four-measure implementation.
 - **Outcome:** none. The dashboard summarizes adherence patterns; it does not model patient outcomes.
 - **Design:** cross-sectional / longitudinal description of adherence.
 

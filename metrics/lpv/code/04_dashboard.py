@@ -988,7 +988,10 @@ print("\n[verify]")
 text = out_html.read_text()
 m = re.search(r'<script id="payload"[^>]*>(.*?)</script>', text, re.S)
 pl = json.loads(m.group(1))
-c6 = f"{VT_DEFAULT:.1f}"
+# The cross-checks below validate the grid against 02_features' assessable_rate, which 02_features
+# computes at VT_MAX_DEFAULT (6.0) — NOT the slider default (VT_DEFAULT, now 8.0 and presentational).
+# Key off the feature cutoff so these checks stay honest regardless of where the slider opens.
+c6 = f"{float(feat['params']['vt_max_default']):.1f}"
 
 
 def alltime_rate(measure, cutoff_key=c6):

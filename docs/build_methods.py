@@ -74,6 +74,7 @@ LPV_CONSTANT_SOURCES = [
     ("metrics/lpv/code/02_features.py", ["ADHERENCE_FRACTION", "VT_MAX_DEFAULT", "PLATEAU_MAX", "DP_MAX"]),
     ("metrics/lpv/code/02d_severity.py", ["PF_THRESHOLD", "SF_THRESHOLD", "SPO2_MAX_FOR_SF", "PEEP_MIN",
                                           "O2_FIO2_LOOKBACK"]),
+    ("metrics/lpv/code/03_aggregate.py", ["VT_DEFAULT"]),   # dashboard Vt-slider initial position
     ("metrics/lpv/code/05_tile_feed.py", ["SCORECARD_VT_CUTOFF", "LPV_GOAL", "DEFINITION_VERSION"]),
 ]
 
@@ -155,7 +156,8 @@ def _knob_section(metric):
     if metric == "lpv":
         rows = _lpv_constant_rows()
         return ("**Definitional constants** (LPV has no `config.json`; scraped from the pipeline code — "
-                "the tile headline uses Vt ≤ `SCORECARD_VT_CUTOFF`, the pipeline default is Vt ≤ "
+                "the tile headline and the dashboard Vt-slider both open at Vt ≤ `SCORECARD_VT_CUTOFF` "
+                "(= `VT_DEFAULT`); the stored per-day adherent status is classified at Vt ≤ "
                 "`VT_MAX_DEFAULT`):\n\n"
                 + _md_table(["Constant", "Value", "Source"], rows))
 
