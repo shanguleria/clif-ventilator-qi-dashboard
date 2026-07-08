@@ -303,8 +303,9 @@ Registry-driven: each metric emits a PHI-free `tile_feed_<metric>.json` (spec:
 drill-down into `output/<site>/dashboard/`. A coarse feed shows a `· site-wide` / `· all-time` badge when
 the global filters are finer than it provides. Adding a metric is: *build the vertical → emit a tile feed →
 add its id to the site's `enabled_metrics`* — no combiner code change. See
-[`metrics/README.md`](metrics/README.md). Tile artwork (`assets/`, gitignored) falls back to inline SVG when
-absent, so a fresh clone still builds.
+[`metrics/README.md`](metrics/README.md). Tile artwork lives in `assets/` (committed, so clones render the
+branded tiles); the scorecard still falls back to inline SVG icons if a file is missing, so it always builds.
+Images are embedded at **build** time, so re-run the scorecard after adding/updating artwork.
 
 ### Grouping ICUs by specific unit
 
@@ -351,9 +352,10 @@ is a real worked example (MIMIC needed exactly two small, now-generalized fixes)
 - Pipelines read CLIF tables but **embed only aggregated values** (rates, counts, binned histograms,
   per-period aggregated Table 1s) — no patient-level rows. Tile feeds carry only `num`/`den` counts and are
   PHI-checked at build time and again when assembled into `output_to_share/`.
-- `output/`, `sites/*.json`, `feeds/*.json`, and `assets/` are gitignored; nothing patient-adjacent is
-  committed. The per-metric `output/<site>/metrics/…` parquet is the PHI/working space and is never placed
-  in `output_to_share/`.
+- `output/`, `sites/*.json`, and `feeds/*.json` are gitignored; nothing patient-adjacent is committed.
+  (`assets/` tile artwork **is** committed so clones render branded — only large scratch/source images,
+  `assets/IMG_*` etc., stay ignored.) The per-metric `output/<site>/metrics/…` parquet is the PHI/working
+  space and is never placed in `output_to_share/`.
 - Dashboards use real within-site ICU unit labels. For audience-facing / consortium use, review your
   consortium's anonymization expectations (per-site displays should use anonymized "Site N").
 

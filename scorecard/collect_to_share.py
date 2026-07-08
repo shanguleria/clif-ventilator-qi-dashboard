@@ -96,15 +96,17 @@ def main() -> None:
         }
         manifest["files"].append(f"feeds/{dest.name}")
 
-    # 2. Dashboards — published, aggregate-only visual deliverables (copied verbatim).
-    for html, tag in ([(dash_dir / "scorecard.html", "scorecard")]
-                      + [(dash_dir / f"{m}_dashboard.html", f"{m}_dashboard") for m in metrics]):
+    # 2. Dashboards — published, aggregate-only visual deliverables. Keep ORIGINAL filenames so the
+    #    scorecard's relative links to its drill-downs (and their back-links) resolve inside this
+    #    folder. Site identity comes from the folder path + manifest.site_id, NOT a filename prefix —
+    #    prefixing broke the scorecard->drilldown link graph.
+    for name in ["scorecard.html"] + [f"{m}_dashboard.html" for m in metrics]:
+        html = dash_dir / name
         if not html.exists():
-            print(f"  [skip] dashboard {html.name} not present")
+            print(f"  [skip] dashboard {name} not present")
             continue
-        dest = share / "dashboards" / f"{site}_{tag}.html"
-        shutil.copyfile(html, dest)
-        manifest["files"].append(f"dashboards/{dest.name}")
+        shutil.copyfile(html, share / "dashboards" / name)
+        manifest["files"].append(f"dashboards/{name}")
 
     # 3. Methods docs — the definitions that must travel with the numbers (copied verbatim).
     for m in included:

@@ -19,10 +19,11 @@ sites/*.json
 .claude/
 plans/
 
-# Brand/tile artwork (local; the scorecard + dashboard fall back to inline SVG without them).
-# NOTE: kept out of the public repo because the illustrations are borrowed from the design
-# inspiration. Revisit in Phase 4 if we license/replace them and want clones to render branded.
-assets/
+# Brand/tile artwork — COMMITTED so every clone/site renders the branded tiles (not the SVG fallback).
+# Keep large scratch/source images (design-reference photos, screenshots, editable sources) OUT.
+assets/IMG_*
+assets/*.psd
+assets/*.ai
 metrics/*/references/images/
 
 # Generated outputs and intermediate data — kept out of git
