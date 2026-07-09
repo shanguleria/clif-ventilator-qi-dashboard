@@ -26,7 +26,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from clifpy.tables import Patient, Hospitalization, Adt, RespiratorySupport, Vitals
+from clifpy.tables import Patient, Hospitalization, Adt, Vitals
 
 
 # ----------------------------------------------------------------------------
@@ -39,6 +39,7 @@ import sys as _sys
 if str(ROOT) not in _sys.path:
     _sys.path.insert(0, str(ROOT))
 import bundle_config as _bc                            # multi-site config + output resolver
+from common.resp_support import load_clean             # shared Level-0 respiratory_support loader
 CFG = _bc.effective("lpv")                             # site = env CLIF_SITE (default uchicago)
 DATA_DIR = CFG["clif_data_path"]
 FILETYPE = CFG.get("filetype", "parquet")
@@ -93,21 +94,13 @@ print(f"  adult hospitalizations: {len(adult_hosp):,}")
 # ----------------------------------------------------------------------------
 
 print("[2] Loading respiratory_support (IMV only) ...")
-imv = RespiratorySupport.from_file(
-    DATA_DIR, filetype=FILETYPE, timezone=TZ,
-    filters={"hospitalization_id": adult_ids, "device_category": ["IMV", "imv"]},  # accept either casing across sites
+imv = load_clean(
+    DATA_DIR, FILETYPE, TZ, adult_ids,
     columns=["hospitalization_id", "recorded_dttm", "device_category"],
-).df
-imv["hospitalization_id"] = imv["hospitalization_id"].astype(str)
-imv["recorded_dttm"] = pd.to_datetime(imv["recorded_dttm"])
+    extra_filters={"device_category": ["IMV", "imv"]},   # accept either casing across sites
+)
 print(f"  IMV rows: {len(imv):,}")
-
-# Calendar day in US/Central
-if imv["recorded_dttm"].dt.tz is None:
-    imv["recorded_dttm"] = imv["recorded_dttm"].dt.tz_localize(TZ)
-else:
-    imv["recorded_dttm"] = imv["recorded_dttm"].dt.tz_convert(TZ)
-imv["calendar_day"] = imv["recorded_dttm"].dt.date
+imv["calendar_day"] = imv["recorded_dttm"].dt.date   # site tz (load_clean returns tz-aware recorded_dttm)
 
 
 # ----------------------------------------------------------------------------

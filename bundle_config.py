@@ -40,6 +40,29 @@ def load_profile(site: str | None = None) -> dict:
     return json.loads(p.read_text())
 
 
+def resolve_as_of(prof: dict | None = None, site: str | None = None) -> str | None:
+    """The data-snapshot date this refresh reflects (e.g. "2026-07-01").
+
+    Precedence: CLIF_AS_OF env  >  site profile `as_of`  >  None. Site-set each refresh (or passed by
+    the scheduled runner), stamped into feed provenance + the share manifest so a reader knows which
+    data snapshot the numbers reflect. Computing it reads NO CLIF data — it is just a label.
+    """
+    env = (os.environ.get("CLIF_AS_OF") or "").strip()
+    if env:
+        return env
+    prof = prof if prof is not None else load_profile(site)
+    return prof.get("as_of") or None
+
+
+def resolve_data_version(prof: dict | None = None, site: str | None = None) -> str | None:
+    """Opaque snapshot identity. Precedence: CLIF_DATA_VERSION env > profile `data_version` > as_of."""
+    env = (os.environ.get("CLIF_DATA_VERSION") or "").strip()
+    if env:
+        return env
+    prof = prof if prof is not None else load_profile(site)
+    return prof.get("data_version") or resolve_as_of(prof, site)
+
+
 def load_definitions(metric: str) -> dict:
     p = ROOT / "definitions" / f"{metric}.json"
     return json.loads(p.read_text()) if p.exists() else {}
@@ -66,6 +89,19 @@ def feeds_dir(site: str | None = None) -> Path:
     return output_root(site) / "feeds"
 
 
+def shared_cache_dir(site: str | None = None) -> Path:
+    """Cross-metric cache (NOT per-metric): the shared Level-1 respiratory_support waterfall lives here
+    so proning/sat/sbt reuse one build. Keyed filenames (scope+version) prevent the narrow-scope reuse
+    that the old per-metric fixed-path cache allowed."""
+    d = output_root(site) / "_shared"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# Bump when the shared waterfall's build/cleaning logic changes (invalidates the cached waterfall).
+WATERFALL_VERSION = "wf-v1"
+
+
 # --------------------------------------------------------------------------- effective config
 def _access_flat(prof: dict) -> dict:
     """LPV-shaped access keys (flat)."""
@@ -75,6 +111,8 @@ def _access_flat(prof: dict) -> dict:
         "timezone": prof["timezone"],
         "site": prof["site_id"],
         "clif_version": prof.get("clif_version"),
+        "as_of": resolve_as_of(prof),
+        "data_version": resolve_data_version(prof),
     }
 
 
@@ -83,6 +121,8 @@ def _access_nested(prof: dict) -> dict:
     return {
         "site": prof["site_id"],
         "timezone": prof["timezone"],
+        "as_of": resolve_as_of(prof),
+        "data_version": resolve_data_version(prof),
         "primary_dataset": {
             "name": prof.get("dataset_name", f'{prof["site_id"]}_CLIF'),
             "clif_version": prof.get("clif_version"),

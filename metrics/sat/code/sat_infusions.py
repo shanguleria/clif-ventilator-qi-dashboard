@@ -47,8 +47,12 @@ def build_drug_segments(inf: pd.DataFrame, cats: set[str], tz: str,
                                      "seg_end", "dose", "active"])
     df["encounter_block"] = df["encounter_block"].astype(str)
     df["admin_dttm"] = coerce_dttm(df["admin_dttm"], tz)
+    # DETERMINISM: duplicate admin_dttm for the same (block, drug) with different dose/action would
+    # otherwise let input order decide which row's segment survives the shift(-1) filter. Content
+    # tie-breaks (stop-action + dose) make the survivor order-invariant.
+    _tb = [c for c in ["mar_action_category", "med_dose"] if c in df.columns]
     df = df.dropna(subset=["admin_dttm"]).sort_values(
-        ["encounter_block", "med_category", "admin_dttm"])
+        ["encounter_block", "med_category", "admin_dttm"] + _tb, na_position="last", kind="stable")
 
     df["seg_end"] = df.groupby(["encounter_block", "med_category"])["admin_dttm"].shift(-1)
     cap = df["admin_dttm"] + timedelta(hours=trailing_cap_h)

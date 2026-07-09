@@ -6,6 +6,8 @@
   "file_format": "parquet",
   "timezone": "US/Central",
   "clif_version": "2.1.0",
+  "as_of": "2026-07-01",
+  "_comment_as_of": "Data-snapshot date this build reflects (YYYY-MM-DD), stamped into feed provenance + the share manifest. Bump it each refresh, or pass it per-run with ./run_site.sh --as-of YYYY-MM-DD (CLIF_AS_OF env). null = unset. Reads no CLIF data; it is just a label.",
   "enabled_metrics": ["lpv", "proning", "sat", "sbt"],
   "unit_labels": {},
   "vocabulary_overrides": {

@@ -162,7 +162,11 @@ def ne_equiv_timeline(inf: pd.DataFrame, vitals_df: pd.DataFrame | None,
     if pd_rows.empty:
         return pd.DataFrame(columns=cols)
 
-    pd_rows = pd_rows.sort_values(["encounter_block", "med_category", "admin_dttm"])
+    # DETERMINISM: pin duplicate (block, drug, admin_dttm) rows by content so which step-segment
+    # survives the shift(-1) filter is order-invariant (feeds the NEE stability screen).
+    _tb = [c for c in ["ne_contrib", "assessable", "med_dose"] if c in pd_rows.columns]
+    pd_rows = pd_rows.sort_values(["encounter_block", "med_category", "admin_dttm"] + _tb,
+                                  na_position="last", kind="stable")
     # Per-drug segment end = next record of the SAME drug, trailing capped.
     grp = pd_rows.groupby(["encounter_block", "med_category"], sort=False)
     pd_rows["seg_end"] = grp["admin_dttm"].shift(-1)

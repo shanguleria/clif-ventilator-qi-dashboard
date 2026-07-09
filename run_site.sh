@@ -19,14 +19,18 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 SITE="${CLIF_SITE:-uchicago}"
+AS_OF="${CLIF_AS_OF:-}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --site) SITE="$2"; shift 2;;
     --site=*) SITE="${1#*=}"; shift;;
-    *) echo "usage: ./run_site.sh [--site <id>]"; exit 1;;
+    --as-of) AS_OF="$2"; shift 2;;             # data-snapshot date (YYYY-MM-DD) -> feed provenance
+    --as-of=*) AS_OF="${1#*=}"; shift;;
+    *) echo "usage: ./run_site.sh [--site <id>] [--as-of YYYY-MM-DD]"; exit 1;;
   esac
 done
 export CLIF_SITE="$SITE"
+[[ -n "$AS_OF" ]] && export CLIF_AS_OF="$AS_OF"
 
 PY=".venv/bin/python"
 [[ -x "$PY" ]] || { echo "ERROR: $PY not found — create the venv: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"; exit 1; }

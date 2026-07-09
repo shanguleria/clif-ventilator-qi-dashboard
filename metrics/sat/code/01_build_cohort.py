@@ -190,25 +190,22 @@ def _normalize_waterfall(wf: pd.DataFrame, tz: str) -> pd.DataFrame:
     return wf
 
 
-def waterfall_cached(co: clifpy.ClifOrchestrator, scope_hosp_ids: list[str],
-                     mapping: pd.DataFrame, tz: str) -> pd.DataFrame:
-    if cpath("resp_waterfall").exists():
-        log.info("cache hit: resp_waterfall  <- the expensive step")
-        wf = pd.read_parquet(cpath("resp_waterfall"))
-        return _normalize_waterfall(wf, tz)
-
-    log.info("waterfall input scope: %d hospitalizations (ICU + sedation)", len(scope_hosp_ids))
-    co.load_table("respiratory_support", filters={"hospitalization_id": scope_hosp_ids})
-    rs = co.respiratory_support.df
-    rs["hospitalization_id"] = rs["hospitalization_id"].astype(str)
-    log.info("loaded respiratory_support: %d rows", len(rs))
-
-    wf = clifpy.process_resp_support_waterfall(rs, id_col="hospitalization_id", bfill=False, verbose=True)
-    wf["hospitalization_id"] = wf["hospitalization_id"].astype(str)
-    wf = wf.merge(mapping[["hospitalization_id", "encounter_block"]].astype({"hospitalization_id": str}),
-                  on="hospitalization_id", how="left")
-    wf.to_parquet(cpath("resp_waterfall"), index=False)   # cache raw-ish, pre-normalization
-    log.info("wrote cache: resp_waterfall (%d rows)", len(wf))
+def waterfall_cached(wf_shared: pd.DataFrame, scope_hosp_ids: list[str], tz: str) -> pd.DataFrame:
+    """Filter the shared union waterfall (common.build_shared.ensure_shared) to SAT's ICU∩sedation
+    scope, write the stage-local slice to CACHE_DIR/resp_waterfall.parquet (the path stage 03 reads),
+    and return it normalized. Cleaning already happened PRE-waterfall inside load_clean (the shared
+    build); `_normalize_waterfall` is idempotent and kept so stage 03 (which re-reads + re-applies it)
+    is unchanged. The filtered slice is byte-identical to SAT's old per-vertical build (verified 0-diff
+    on content columns at consolidation)."""
+    scope = set(map(str, scope_hosp_ids))
+    wf = wf_shared[wf_shared["hospitalization_id"].astype(str).isin(scope)].copy()
+    # The shared waterfall carries encounter_block as float64 (int block-id + NaN from the left-merge);
+    # SAT keys ICU intervals on a clean int-string encounter_block ("110135"), so cast to match — else
+    # the str-vs-float imv∩icu join silently yields zero.
+    wf["encounter_block"] = wf["encounter_block"].astype("Int64").astype(str)
+    log.info("waterfall: filtered shared union to %d hospitalizations (ICU + sedation; %d rows)",
+             len(scope), len(wf))
+    wf.to_parquet(cpath("resp_waterfall"), index=False)
     return _normalize_waterfall(wf, tz)
 
 
@@ -221,7 +218,11 @@ def build_imv_intervals(wf: pd.DataFrame) -> pd.DataFrame:
     trailing record of a block is capped at TRAILING_IMV_CAP_H."""
     w = wf.dropna(subset=["encounter_block", "recorded_dttm"]).copy()
     w["encounter_block"] = w["encounter_block"].astype(str)
-    w = w.sort_values(["encounter_block", "recorded_dttm"])
+    # DETERMINISM: a stitched block can carry two rows at the same recorded_dttm (overlapping
+    # hospitalizations, ~0.1% of rows); the shift(-1) segment then depends on their order. Add content
+    # tie-breaks so the surviving segment (and thus imv presence at that instant) is order-invariant.
+    _tb = [c for c in ["device_category", "mode_category", "fio2_set", "peep_set"] if c in w.columns]
+    w = w.sort_values(["encounter_block", "recorded_dttm"] + _tb, na_position="last", kind="stable")
     w["seg_end"] = w.groupby("encounter_block")["recorded_dttm"].shift(-1)
     cap = w["recorded_dttm"] + timedelta(hours=TRAILING_IMV_CAP_H)
     w["seg_end"] = w["seg_end"].fillna(cap)
@@ -318,30 +319,26 @@ def expand_to_days(vint: pd.DataFrame, tz: str) -> pd.DataFrame:
     if dd.empty:
         return dd
 
-    # Collapse to one row per (block, day): unit = max-overlap unit; aggregate window.
-    dd = dd.sort_values(["encounter_block", "icu_day", "overlap_min"], ascending=[True, True, False])
-    agg = (dd.groupby(["encounter_block", "icu_day"])
-             .agg(unit=("unit", "first"),                 # max-overlap unit (sorted desc)
+    # Collapse to one row per (block, day). Unit attribution = the unit the patient STARTED the
+    # ICU-day in — the earliest ICU interval of the day (min day_in). ADT locations are mutually
+    # exclusive, so min(day_in) is unique per (block, day): the pick is tie-free / order-invariant
+    # by construction. (The old rule was max-overlap unit with no tie-break key, so a day split
+    # evenly between two units flipped on input row order — see the determinism note in
+    # plans/phase2_implementation_plan.md.) `unit` and `unit_name` both come from that same earliest
+    # interval, so location_type and specific-unit are always consistent, which also lets us drop the
+    # separate nested unit_name re-pick. Duration aggregates (minutes / in / out) are unchanged.
+    # Clinical rationale: SAT/SBT are morning, nursing-driven, so the unit that owns the trial
+    # opportunity is the one the patient is in going into the day; this also matches proning's
+    # single-instant unit attribution. The trailing sort keys (unit, unit_name) only make the
+    # (should-be-impossible) exact day_in tie a total order too.
+    dd = dd.sort_values(["encounter_block", "icu_day", "day_in", "unit", "unit_name"])
+    agg = (dd.groupby(["encounter_block", "icu_day"], as_index=False)
+             .agg(unit=("unit", "first"),                 # start-of-day unit (earliest interval)
+                  unit_name=("unit_name", "first"),
                   vented_icu_minutes=("overlap_min", "sum"),
                   day_in=("day_in", "min"),
-                  day_out=("day_out", "max"))
-             .reset_index())
+                  day_out=("day_out", "max")))
     agg["unit"] = agg["unit"].fillna("unknown").replace("", "unknown")
-
-    # Specific unit (location_name), NESTED within the chosen type: among that day's
-    # intervals whose location_type == the chosen unit, pick the location_name with the
-    # most ventilated-ICU overlap (alphabetical tie-break). Keeps `unit` (type) numbers
-    # unchanged and guarantees every unit_name rolls up to exactly one unit.
-    dn = dd.merge(agg[["encounter_block", "icu_day", "unit"]]
-                  .rename(columns={"unit": "chosen_unit"}), on=["encounter_block", "icu_day"])
-    dn = dn[dn["unit"] == dn["chosen_unit"]]
-    name_agg = (dn.groupby(["encounter_block", "icu_day", "unit_name"])["overlap_min"].sum()
-                .reset_index()
-                .sort_values(["encounter_block", "icu_day", "overlap_min", "unit_name"],
-                             ascending=[True, True, False, True])
-                .drop_duplicates(["encounter_block", "icu_day"]))
-    agg = agg.merge(name_agg[["encounter_block", "icu_day", "unit_name"]],
-                    on=["encounter_block", "icu_day"], how="left")
     agg["unit_name"] = agg["unit_name"].fillna("unknown").replace("", "unknown")
     log.info("ventilated-ICU patient-days: %d (across %d encounter_blocks); specific units: %d",
              len(agg), agg["encounter_block"].nunique(), agg["unit_name"].nunique())
@@ -354,7 +351,11 @@ def expand_to_days(vint: pd.DataFrame, tz: str) -> pd.DataFrame:
 def attach_demographics(days: pd.DataFrame, co: clifpy.ClifOrchestrator,
                         hosp_s: pd.DataFrame, mapping: pd.DataFrame) -> pd.DataFrame:
     pat_cols = ["patient_id", "sex_category", "race_category", "ethnicity_category", "death_dttm"]
-    pat = co.patient.df[[c for c in pat_cols if c in co.patient.df.columns]].drop_duplicates("patient_id")
+    # DETERMINISM: sort before dedup so a (rare) duplicate patient_id with differing demographics
+    # keeps a fixed row, not an order-dependent one.
+    _pcols = [c for c in pat_cols if c in co.patient.df.columns]
+    pat = (co.patient.df[_pcols].sort_values(_pcols, na_position="last")
+           .drop_duplicates("patient_id", keep="first"))
 
     hosp_cols = ["hospitalization_id", "patient_id", "age_at_admission",
                  "admission_dttm", "discharge_dttm", "admission_type_category", "discharge_category"]
@@ -364,10 +365,13 @@ def attach_demographics(days: pd.DataFrame, co: clifpy.ClifOrchestrator,
     m = mapping[["hospitalization_id", "encounter_block"]].astype({"hospitalization_id": str}).copy()
     m["encounter_block"] = m["encounter_block"].astype(str)
     # Block-level: primary row = earliest-admission hospitalization; list of all hids.
-    hb = m.merge(hosp, on="hospitalization_id", how="left").sort_values(["encounter_block", "admission_dttm"])
+    # DETERMINISM: tie-break the block-primary pick and the id list by hospitalization_id so two
+    # hospitalizations sharing an admission_dttm resolve the same way and the id list is byte-stable.
+    hb = m.merge(hosp, on="hospitalization_id", how="left").sort_values(
+        ["encounter_block", "admission_dttm", "hospitalization_id"], na_position="last")
     block_primary = hb.drop_duplicates("encounter_block", keep="first")
     ids_per_block = (m.groupby("encounter_block")["hospitalization_id"]
-                       .apply(list).rename("hospitalization_ids").reset_index())
+                       .apply(lambda s: sorted(s)).rename("hospitalization_ids").reset_index())
 
     out = (days
            .merge(block_primary, on="encounter_block", how="left")
@@ -407,8 +411,9 @@ def main() -> None:
              sorted(med_sets["sat_relevant"]), sorted(med_sets["dex"]), sorted(med_sets["paralytic"]))
 
     co = build_orchestrator(cfg)
-    load_small_tables(co)
-    hosp_s, adt_s, mapping = stitch_cached(co)
+    from common.build_shared import ensure_shared
+    wf_shared, mapping, hosp_s, adt_s = ensure_shared(
+        co, tz, _SITE, waterfall_version=_bc.WATERFALL_VERSION)
     mapping["encounter_block"] = mapping["encounter_block"].astype(str)
     mapping["hospitalization_id"] = mapping["hospitalization_id"].astype(str)
 
@@ -427,10 +432,14 @@ def main() -> None:
     if not scope_hosp_ids:
         raise RuntimeError("empty cohort scope — check encounter_block alignment between adt and mapping")
 
-    wf = waterfall_cached(co, scope_hosp_ids, mapping, tz)
+    wf = waterfall_cached(wf_shared, scope_hosp_ids, tz)
 
     imv = build_imv_intervals(wf)
     vint = intersect_imv_icu(imv, icu)
+    # DETERMINISM: intersect_imv_icu returns a raw DuckDB join (no row-order guarantee); sort to a
+    # total order so the cached parquet is byte-stable across runs.
+    _vcols = [c for c in ["encounter_block", "vstart", "vend", "unit", "unit_name"] if c in vint.columns]
+    vint = vint.sort_values(_vcols, na_position="last").reset_index(drop=True)
     vint.to_parquet(INTERMEDIATE_DIR / "vent_icu_intervals.parquet", index=False)
 
     days = expand_to_days(vint, tz)

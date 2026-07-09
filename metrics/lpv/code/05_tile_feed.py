@@ -199,6 +199,8 @@ lpv_feed = {
         "code_version": _git_sha(),
         "clif_version": CFG.get("clif_version"),
         "definition_version": DEFINITION_VERSION,
+        "as_of": CFG.get("as_of"),
+        "data_version": CFG.get("data_version"),
         "generated": datetime.now().isoformat(timespec="minutes"),
     },
 }

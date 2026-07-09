@@ -341,6 +341,7 @@ def main():
                      "Living methods / data-dictionary reference for every component of the QI bundle "
                      "scorecard. Each tile has its own methods doc; the combiner has one too.\n\n"
                      "- Combiner: [`scorecard_methods.md`](scorecard_methods.md)\n"
+                     "- Reproducibility (plain-English): [`determinism.md`](determinism.md)\n"
                      "- Tile-feed contract: [`../contract/tile_feed_contract.md`](../contract/tile_feed_contract.md)")
     targets.append(("docs/README.md", DOCS / "README.md", index_autogen(canonical, feeds), idx_stub))
 

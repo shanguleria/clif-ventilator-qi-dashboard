@@ -23,10 +23,7 @@
     "vitals"
   ],
 
-  "_comment_cohort": "SBT = ventilated-ICU patient-days (IMV ∩ ICU, day-expanded). seed_cache_from may point at a sibling metric's warm _cache (resp_waterfall + stitched adt/hosp/encounter_mapping) to reuse the expensive respiratory_support waterfall; set to null to build the full ICU∩IMV waterfall from scratch (slower, but the complete cohort).",
-  "cohort": {
-    "seed_cache_from": null
-  },
+  "_comment_cohort": "SBT = ventilated-ICU patient-days (IMV ∩ ICU, day-expanded). SBT builds its own full ICU∩IMV respiratory_support waterfall via the shared common.resp_support.build_waterfall substrate; the ~35-min build is cached with a WATERFALL_VERSION sidecar and rebuilds automatically on a version bump.",
 
   "_comment_sbt_modes": "Run code/00_probe_documentation.py FIRST to confirm your site's respiratory_support mode_category strings. CONTROLLED ventilation gates the >=12h eligibility clock; SUPPORT (pressure support/cpap) is the SBT target mode.",
   "sbt_modes": {

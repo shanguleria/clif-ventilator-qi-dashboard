@@ -33,7 +33,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from clifpy.tables import RespiratorySupport, Labs, Vitals
+from clifpy.tables import Labs, Vitals
 
 ROOT = Path(__file__).resolve().parents[3]            # bundle root (holds bundle_config.py)
 _METRIC_ROOT = Path(__file__).resolve().parents[1]    # metrics/lpv (per-metric outputs)
@@ -41,6 +41,7 @@ import sys as _sys
 if str(ROOT) not in _sys.path:
     _sys.path.insert(0, str(ROOT))
 import bundle_config as _bc                            # multi-site config + output resolver
+from common.resp_support import load_clean             # shared Level-0 respiratory_support loader
 CFG = _bc.effective("lpv")                             # site = env CLIF_SITE (default uchicago)
 DATA_DIR = CFG["clif_data_path"]
 FILETYPE = CFG.get("filetype", "parquet")
@@ -74,27 +75,22 @@ cohort["hospitalization_id"] = cohort["hospitalization_id"].astype(str)
 cohort["calendar_day"] = pd.to_datetime(cohort["calendar_day"]).dt.date
 cohort_ids = cohort["hospitalization_id"].unique().tolist()
 
-rs_tbl = RespiratorySupport.from_file(
-    DATA_DIR, filetype=FILETYPE, timezone=TZ,
-    filters={"hospitalization_id": cohort_ids},
+rs = load_clean(
+    DATA_DIR, FILETYPE, TZ, cohort_ids,
     columns=["hospitalization_id", "recorded_dttm", "fio2_set", "peep_obs", "peep_set"],
 )
-try:
-    from clifpy.utils.outlier_handler import apply_outlier_handling
-    apply_outlier_handling(rs_tbl)
-except Exception:
-    pass
-rs = rs_tbl.df
-rs["hospitalization_id"] = rs["hospitalization_id"].astype(str)
-rs["recorded_dttm"] = to_central(rs["recorded_dttm"])
 rs = rs.dropna(subset=["recorded_dttm"])
 rs["peep"] = rs["peep_obs"].fillna(rs["peep_set"])
 
 # Raw non-null FiO2 and PEEP observations (each its own asof series)
+# Sort with the VALUE as a secondary key so merge_asof's pick among equal-timestamp ties is a
+# deterministic function of the data — not of clifpy from_file's unordered row order. Without this,
+# tied-timestamp fio2/peep readings made worst_pf/worst_sf (and occasionally a borderline severity
+# classification) vary run-to-run; two identical runs could differ on a handful of patient-days.
 fio2_obs = rs.loc[rs["fio2_set"].notna(), ["hospitalization_id", "recorded_dttm", "fio2_set"]] \
-             .sort_values("recorded_dttm").reset_index(drop=True)
+             .sort_values(["recorded_dttm", "fio2_set"]).reset_index(drop=True)
 peep_obs = rs.loc[rs["peep"].notna(), ["hospitalization_id", "recorded_dttm", "peep"]] \
-             .sort_values("recorded_dttm").reset_index(drop=True)
+             .sort_values(["recorded_dttm", "peep"]).reset_index(drop=True)
 print(f"  FiO2 obs: {len(fio2_obs):,}  PEEP obs: {len(peep_obs):,}")
 
 # ----------------------------------------------------------------------------

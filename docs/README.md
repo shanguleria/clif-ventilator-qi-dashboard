@@ -16,6 +16,9 @@ generated date). If the two ever disagree, the AUTOGEN block is authoritative an
 - **Per-metric methods** — one doc per tile (linked in the table below).
 - **Combiner** — [`scorecard_methods.md`](scorecard_methods.md): how the tiles are assembled, grain
   fallback, unit grouping.
+- **Reproducibility** — [`determinism.md`](determinism.md): a plain-English, clinician-focused note on
+  why the dashboard reports the same numbers every run at every site (and why the unit label is the
+  start-of-day unit). Travels with every site's `output_to_share/methods/`.
 - **Tile-feed contract** — [`../contract/tile_feed_contract.md`](../contract/tile_feed_contract.md):
   the PHI-free feed schema every metric emits, and the provenance/pooling rules.
 

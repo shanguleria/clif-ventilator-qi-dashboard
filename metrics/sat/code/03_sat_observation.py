@@ -69,7 +69,9 @@ def _group_active_segs(segs: pd.DataFrame) -> dict:
                                      act["seg_start"], act["seg_end"], act["dose"]):
         g[blk].append((drug, s, e, float(dose)))
     for blk in g:
-        g[blk].sort(key=lambda r: r[1])
+        # DETERMINISM: total-order key (seg_start, seg_end, drug, dose), not seg_start alone, so
+        # same-start segments order the same way every run.
+        g[blk].sort(key=lambda r: (r[1], r[2], r[0], r[3]))
     return g
 
 
@@ -77,14 +79,16 @@ def _kress_for_gap(active_segs: list, gs, ge, day_out) -> list[dict]:
     """Per-drug pre-hold vs post-resume rate for one resumed hold."""
     rows = []
     drugs = {r[0] for r in active_segs}
-    for drug in drugs:
+    for drug in sorted(drugs):                                   # DETERMINISM: fixed drug order (set is unordered)
         ds = [r for r in active_segs if r[0] == drug]
         pre = [r for r in ds if r[1] < gs]                       # active started before hold
         post = [r for r in ds if r[1] >= ge and r[1] <= day_out]  # resumed within the day window
         if not pre or not post:
             continue
-        pre_dose = max(pre, key=lambda r: r[1])[3]               # most recent pre-hold dose
-        post_dose = min(post, key=lambda r: r[1])[3]             # first post-resume dose
+        # DETERMINISM: total-order key (seg_start, seg_end, dose) so a same-timestamp tie picks the
+        # same pre-hold / post-resume segment every run.
+        pre_dose = max(pre, key=lambda r: (r[1], r[2], r[3]))[3]   # most recent pre-hold dose
+        post_dose = min(post, key=lambda r: (r[1], r[2], r[3]))[3]  # first post-resume dose
         if pre_dose and pre_dose > 0:
             rows.append({"med_category": drug, "pre_rate": pre_dose,
                          "post_rate": post_dose, "ratio": post_dose / pre_dose})
