@@ -4,6 +4,10 @@ How the bundle scorecard (`scorecard/build_scorecard.py`) assembles the per-metr
 grain-fallback and unit-grouping rules. Prose is hand-written; the enabled-metric list and per-tile grain
 in the AUTOGEN block are stamped from `config.json` + the feeds on every rebuild.
 
+> **Reproducibility:** the dashboard produces the same numbers every time it is run, at every site. For a
+> plain-English, clinician-focused explanation of how that is guaranteed (and why the unit label is "the
+> unit the patient started the day in"), see **[`determinism.md`](determinism.md)** in this folder.
+
 ## What the scorecard is
 A single HTML page (`output/dashboard/scorecard.html`) showing one tile per QI metric, with global
 Week / Month / Unit selectors and a "Group ICUs by" (type vs specific unit) toggle. The combiner is a

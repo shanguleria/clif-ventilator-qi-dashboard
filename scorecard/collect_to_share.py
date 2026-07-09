@@ -119,6 +119,12 @@ def main() -> None:
     if sc_md.exists():
         shutil.copyfile(sc_md, share / "methods" / "scorecard_methods.md")
         manifest["files"].append("methods/scorecard_methods.md")
+    # Site-invariant reproducibility note — travels with every site's methods so the determinism
+    # guarantee is findable alongside the numbers.
+    det_md = ROOT / "docs" / "determinism.md"
+    if det_md.exists():
+        shutil.copyfile(det_md, share / "methods" / "determinism.md")
+        manifest["files"].append("methods/determinism.md")
 
     (share / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
