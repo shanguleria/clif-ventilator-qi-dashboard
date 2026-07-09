@@ -127,16 +127,38 @@ def load_clean(data_dir, filetype, timezone, hosp_ids, columns=None, *,
     return rs
 
 
+def _numpy_backed(df):
+    """Coerce pyarrow-backed columns to classic numpy dtypes (object for text/bool, float64 for numeric),
+    leaving datetime columns alone. clifpy's waterfall run-length-encodes via `s.ne(s.shift()).cumsum()`,
+    and on pandas-3/pyarrow the resulting bool[pyarrow] has no cumsum kernel — numpy-backed dtypes avoid
+    it. Applied only in the Level-1 waterfall path (LPV consumes load_clean directly and is unaffected)."""
+    out = df.copy()
+    for c in out.columns:
+        s = out[c]
+        if pd.api.types.is_datetime64_any_dtype(s):
+            continue
+        if pd.api.types.is_bool_dtype(s):
+            out[c] = s.astype("object")
+        elif pd.api.types.is_numeric_dtype(s):
+            out[c] = pd.to_numeric(s.astype("object"), errors="coerce").astype("float64")
+        else:
+            out[c] = s.astype("object")
+    return out
+
+
 def build_waterfall(data_dir, filetype, timezone, scope_hosp_ids, encounter_mapping, *,
-                    cache_dir, waterfall_version, data_version=None, verbose=True):
+                    cache_dir, waterfall_version, data_version=None, cache_name=None, verbose=True):
     """LEVEL 1 (proning/sat/sbt): the filled + hourly-scaffold ventilator timeline, built ON TOP of the
     Level-0 clean. Runs clifpy.process_resp_support_waterfall(load_clean(scope), bfill=False), attaches
-    `encounter_block` from `encounter_mapping`, and caches to
-    `cache_dir/resp_waterfall__<key>.parquet` keyed on (scope, waterfall_version, data_version). The
-    scope-keyed filename means a narrow-scope build can never be silently reused for a wider-scope need
-    (the failure mode of the old fixed per-metric path). Returns the waterfall DataFrame.
+    `encounter_block` from `encounter_mapping`, and caches under `cache_dir`. Returns the waterfall
+    DataFrame. Cleaning is PRE-waterfall inside load_clean — there is no post-waterfall normalize step.
 
-    NOTE: cleaning is done PRE-waterfall inside load_clean; there is no post-waterfall normalize step.
+    Cache filename:
+      * default (cache_name=None): scope-keyed `resp_waterfall__<hash(scope,version,data)>.parquet` — a
+        narrow-scope build can never be silently reused for a wider-scope need (the old fixed-path bug).
+      * cache_name="resp_waterfall": a FIXED name, for a vertical whose own later stages read that exact
+        path. A sibling `<name>.version` sidecar records waterfall_version; a version mismatch is treated
+        as a miss so the cache auto-rebuilds after a WATERFALL_VERSION bump (no manual --refresh needed).
     """
     import hashlib
     from pathlib import Path
@@ -144,25 +166,43 @@ def build_waterfall(data_dir, filetype, timezone, scope_hosp_ids, encounter_mapp
 
     cache_dir = Path(cache_dir); cache_dir.mkdir(parents=True, exist_ok=True)
     scope = sorted({str(h) for h in scope_hosp_ids})
-    key_src = "\n".join(scope) + f"::wf={waterfall_version}::data={data_version or ''}"
-    key = hashlib.sha1(key_src.encode()).hexdigest()[:16]
-    cache_path = cache_dir / f"resp_waterfall__{key}.parquet"
+    ver_tag = f"{waterfall_version}|{data_version or ''}"
 
-    if cache_path.exists():
+    if cache_name:
+        cache_path = cache_dir / f"{cache_name}.parquet"
+        ver_path = cache_dir / f"{cache_name}.version"
+        fresh = (cache_path.exists() and ver_path.exists()
+                 and ver_path.read_text().strip() == ver_tag)
+    else:
+        key = hashlib.sha1(("\n".join(scope) + "::" + ver_tag).encode()).hexdigest()[:16]
+        cache_path = cache_dir / f"resp_waterfall__{key}.parquet"
+        ver_path = None
+        fresh = cache_path.exists()
+
+    if fresh:
         if verbose:
-            print(f"[resp_support.build_waterfall] cache hit {cache_path.name} "
-                  f"(scope={len(scope)} hosps)")
+            print(f"[resp_support.build_waterfall] cache hit {cache_path.name} (scope={len(scope)} hosps)")
         return pd.read_parquet(cache_path)
 
     rs = load_clean(data_dir, filetype, timezone, scope, columns="all", verbose=verbose)
+    rs = _numpy_backed(rs)   # clifpy waterfall needs numpy-backed dtypes (bool[pyarrow].cumsum has no kernel)
+    # clifpy's waterfall assumes UTC input: its hourly scaffold is generated in UTC (waterfall.py, the
+    # DuckDB `utc=True` scaffold). load_clean hands it site-local tz-aware rows, so on pandas-3 the
+    # concat of local real rows + UTC scaffold rows demotes recorded_dttm to a mixed-tz *object* column,
+    # which downstream `pd.to_datetime(errors="coerce")` then NaT's on every scaffold row. Feed UTC in,
+    # convert the (clean, single-tz) result back to the site tz — same absolute instants either way.
+    rs["recorded_dttm"] = pd.to_datetime(rs["recorded_dttm"], utc=True)
     wf = clifpy.process_resp_support_waterfall(
         rs, id_col="hospitalization_id", bfill=False, verbose=verbose,
     )
+    wf["recorded_dttm"] = pd.to_datetime(wf["recorded_dttm"], utc=True).dt.tz_convert(timezone)
     wf["hospitalization_id"] = wf["hospitalization_id"].astype(str)
     em = encounter_mapping[["hospitalization_id", "encounter_block"]].copy()
     em["hospitalization_id"] = em["hospitalization_id"].astype(str)
     wf = wf.merge(em, on="hospitalization_id", how="left")
     wf.to_parquet(cache_path, index=False)
+    if ver_path is not None:
+        ver_path.write_text(ver_tag)
     if verbose:
         print(f"[resp_support.build_waterfall] built {len(wf):,} rows "
               f"(scope={len(scope)} hosps) -> {cache_path.name}")

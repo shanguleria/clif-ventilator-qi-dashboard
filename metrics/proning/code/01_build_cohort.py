@@ -164,31 +164,21 @@ def waterfall_cached(
     mapping: pd.DataFrame,
     tz: str,
 ) -> tuple[pd.DataFrame, str]:
-    if cpath("resp_waterfall").exists():
-        log.info("cache hit: resp_waterfall  ← the 35-min step")
-        wf = pd.read_parquet(cpath("resp_waterfall"))
-        wf = _normalize_waterfall(wf, tz)
-        return wf, "from cache"
+    """Level-1 waterfall via the shared common.resp_support.build_waterfall, at proning's ABG-having
+    scope. Cleaning (CLIF-spec outlier ranges + FiO2 percent→fraction detect + device/mode lowercase)
+    now happens PRE-waterfall inside load_clean; the old post-hoc _normalize_waterfall step is gone
+    (it survives only for the diagnostic probes). Still caches to CACHE_DIR/resp_waterfall.parquet, the
+    exact path stages 02/02b read — a `.version` sidecar auto-rebuilds it on a WATERFALL_VERSION bump."""
+    from common.resp_support import build_waterfall
 
     abg_hosp_ids = abg_df["hospitalization_id"].dropna().astype(str).unique().tolist()
-    log.info("waterfall input: %d hospitalizations (filtered to ABG-having)", len(abg_hosp_ids))
-    co.load_table("respiratory_support", filters={"hospitalization_id": abg_hosp_ids})
-    rs = co.respiratory_support.df
-    log.info("loaded respiratory_support: %d rows", len(rs))
-
-    wf = clifpy.process_resp_support_waterfall(
-        rs, id_col="hospitalization_id", bfill=False, verbose=True
+    log.info("waterfall scope: %d hospitalizations (ABG-having)", len(abg_hosp_ids))
+    wf = build_waterfall(
+        co.data_directory, co.filetype, tz, abg_hosp_ids, mapping,
+        cache_dir=CACHE_DIR, cache_name="resp_waterfall",
+        waterfall_version=_bc.WATERFALL_VERSION,
     )
-    wf = wf.merge(mapping[["hospitalization_id", "encounter_block"]],
-                  on="hospitalization_id", how="left")
-
-    # Cache the raw-ish waterfall BEFORE normalization so cache stays valid
-    # when we tweak normalization rules.
-    wf.to_parquet(cpath("resp_waterfall"), index=False)
-    log.info("wrote cache: resp_waterfall (%d rows)", len(wf))
-
-    wf = _normalize_waterfall(wf, tz)
-    return wf, "fresh + normalized"
+    return wf, f"common.build_waterfall (wf={_bc.WATERFALL_VERSION})"
 
 
 def _normalize_waterfall(wf: pd.DataFrame, tz: str) -> pd.DataFrame:
