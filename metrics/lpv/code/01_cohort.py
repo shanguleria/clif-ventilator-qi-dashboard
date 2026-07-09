@@ -135,7 +135,13 @@ print("[4] Attributing IMV rows to ICU stays via merge_asof ...")
 
 # Sort for merge_asof — must be sorted by the `on` column globally
 imv_sorted = imv.sort_values("recorded_dttm").reset_index(drop=True)
-icu_sorted = icu.sort_values("in_dttm").reset_index(drop=True)
+# DETERMINISM: the backward asof matches each IMV row to the most recent ICU stay by in_dttm; if a
+# hospitalization has two ICU stays sharing in_dttm, which one's location_type/location_name/out_dttm
+# is attached would otherwise depend on input order — and that flows into the whole unit attribution
+# + the in_icu (< out_dttm) filter. Tie-break the right table to a total order (extra keys keep in_dttm
+# monotonic, so merge_asof is still satisfied).
+icu_sorted = icu.sort_values(
+    ["in_dttm", "location_type", "location_name", "out_dttm"], kind="stable").reset_index(drop=True)
 
 # Backward-merge: for each IMV row, take the most recent ICU stay that started before recorded_dttm
 attr = pd.merge_asof(
@@ -158,48 +164,22 @@ print(f"  IMV rows with no ICU overlap (ward-IMV): {n_imv_ward:,} ({n_imv_ward /
 # Drop ward-IMV rows (excluded from cohort per design)
 attr_icu = attr.loc[attr["in_icu"]].copy()
 
-# Reset location_type to nan for ward-IMV (we excluded them) — not used now
-# Build per-day-per-unit counts for unit assignment
 attr_icu["calendar_day"] = attr_icu["recorded_dttm"].dt.date
-day_unit = (
-    attr_icu.groupby(["hospitalization_id", "calendar_day", "location_type"])
-    .size()
-    .reset_index(name="n_imv_rows_in_unit")
-)
-# Pick top unit per (hosp, day) — ties broken alphabetically (sort ascending on location_type, descending on count, then keep first)
-day_unit = day_unit.sort_values(
-    ["hospitalization_id", "calendar_day", "n_imv_rows_in_unit", "location_type"],
-    ascending=[True, True, False, True],
-)
-top_unit = day_unit.drop_duplicates(subset=["hospitalization_id", "calendar_day"], keep="first")
-top_unit = top_unit.rename(columns={"location_type": "assigned_unit"})
-
-# --- Specific-unit (location_name) assignment, NESTED within the chosen location_type ---
-# Keep the location_type pick above untouched (type-level numbers must not move), then,
-# among that day's IMV rows whose location_type == the assigned type, pick the
-# location_name with the most rows (same alphabetical tie-break). Deriving the name
-# within the already-chosen type guarantees every assigned_unit_name rolls up to exactly
-# one assigned_unit (clean nesting; name-level day-counts sum to the type total).
-day_name = (
-    attr_icu.groupby(["hospitalization_id", "calendar_day", "location_type", "location_name"])
-    .size()
-    .reset_index(name="n_imv_rows_in_name")
-)
-# Restrict to rows of each day's chosen type, then pick the top location_name.
-day_name = day_name.merge(
-    top_unit[["hospitalization_id", "calendar_day", "assigned_unit"]],
-    on=["hospitalization_id", "calendar_day"], how="inner",
-)
-day_name = day_name[day_name["location_type"] == day_name["assigned_unit"]]
-day_name = day_name.sort_values(
-    ["hospitalization_id", "calendar_day", "n_imv_rows_in_name", "location_name"],
-    ascending=[True, True, False, True],
-)
-top_name = day_name.drop_duplicates(subset=["hospitalization_id", "calendar_day"], keep="first")
-top_name = top_name.rename(columns={"location_name": "assigned_unit_name"})
-top_unit = top_unit.merge(
-    top_name[["hospitalization_id", "calendar_day", "assigned_unit_name"]],
-    on=["hospitalization_id", "calendar_day"], how="left",
+# Unit attribution = the ICU unit the patient was in at the START of the ventilated ICU day — the
+# location_type + location_name of the EARLIEST IMV-in-ICU row that calendar day. This matches the
+# start-of-day rule now used by sat/sbt (and proning's single-instant attribution), so all four tiles
+# attribute a patient-day the same way. Both the type (assigned_unit) and the nested specific unit
+# (assigned_unit_name) come from that one row, so the name always rolls up to exactly one type (clean
+# nesting, no separate name pick). The trailing (location_type, location_name) sort keys only make a
+# same-instant tie a total order. (Previously: most-IMV-rows/day with an alphabetical tie-break —
+# already deterministic, but a different rule than the other tiles; see docs/determinism.md.)
+top_unit = (
+    attr_icu.sort_values(
+        ["hospitalization_id", "calendar_day", "recorded_dttm", "location_type", "location_name"],
+        kind="stable")
+    .drop_duplicates(subset=["hospitalization_id", "calendar_day"], keep="first")
+    [["hospitalization_id", "calendar_day", "location_type", "location_name"]]
+    .rename(columns={"location_type": "assigned_unit", "location_name": "assigned_unit_name"})
 )
 
 # Per (hosp, day): total IMV rows on ICU

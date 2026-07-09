@@ -86,7 +86,9 @@ There were about a dozen, falling into four groups:
 | Sedation dose **before** vs. **after** an interruption (Kress) | **Most recent** qualifying dose before; **earliest** qualifying dose after (ties broken by end-time, then dose). |
 
 Every rule above is a *total order* — it always lands on one answer — so no result can depend on the
-incidental order the records arrived in.
+incidental order the records arrived in. **All four tiles** (lung-protective ventilation, proning, SAT,
+SBT) now attribute a patient-day to its **start-of-day unit**, so a given day is labeled with the same
+ICU consistently across the whole scorecard.
 
 ## What was done, and how we know it worked
 
@@ -95,8 +97,9 @@ computer stops flipping coins. The work was done systematically — first catalo
 could occur (so it wouldn't be half-fixed), then pinning each one.
 
 It was then **proven** by deliberately scrambling the data into many random orders and confirming the
-results came out identical every time — including a test that shuffled the entire multi-million-row
-ventilator timeline and reproduced a byte-for-byte identical dashboard.
+results came out identical every time — including tests that shuffled the entire multi-million-row
+ventilator timeline, and separately each tile's underlying records, each reproducing a byte-for-byte
+identical dashboard.
 
 ## The bottom line
 
