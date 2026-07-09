@@ -83,10 +83,14 @@ rs = rs.dropna(subset=["recorded_dttm"])
 rs["peep"] = rs["peep_obs"].fillna(rs["peep_set"])
 
 # Raw non-null FiO2 and PEEP observations (each its own asof series)
+# Sort with the VALUE as a secondary key so merge_asof's pick among equal-timestamp ties is a
+# deterministic function of the data — not of clifpy from_file's unordered row order. Without this,
+# tied-timestamp fio2/peep readings made worst_pf/worst_sf (and occasionally a borderline severity
+# classification) vary run-to-run; two identical runs could differ on a handful of patient-days.
 fio2_obs = rs.loc[rs["fio2_set"].notna(), ["hospitalization_id", "recorded_dttm", "fio2_set"]] \
-             .sort_values("recorded_dttm").reset_index(drop=True)
+             .sort_values(["recorded_dttm", "fio2_set"]).reset_index(drop=True)
 peep_obs = rs.loc[rs["peep"].notna(), ["hospitalization_id", "recorded_dttm", "peep"]] \
-             .sort_values("recorded_dttm").reset_index(drop=True)
+             .sort_values(["recorded_dttm", "peep"]).reset_index(drop=True)
 print(f"  FiO2 obs: {len(fio2_obs):,}  PEEP obs: {len(peep_obs):,}")
 
 # ----------------------------------------------------------------------------
