@@ -192,6 +192,17 @@ def build_waterfall(data_dir, filetype, timezone, scope_hosp_ids, encounter_mapp
     # which downstream `pd.to_datetime(errors="coerce")` then NaT's on every scaffold row. Feed UTC in,
     # convert the (clean, single-tz) result back to the site tz — same absolute instants either way.
     rs["recorded_dttm"] = pd.to_datetime(rs["recorded_dttm"], utc=True)
+    # DETERMINISM: clifpy's waterfall forward-fill + RLE is row-order dependent, and
+    # (hospitalization_id, recorded_dttm) is not strictly unique, so the built waterfall could depend
+    # on the order RespiratorySupport.from_file happened to return. Pre-sort into one canonical total
+    # order (id, time, then content columns) with a stable kind so equal rows keep a fixed relative
+    # order. Only runs on the cold-build path; the cached waterfall is unchanged until a
+    # WATERFALL_VERSION bump.
+    _content = [c for c in ["device_category", "device_name", "mode_category", "mode_name",
+                            "tracheostomy", "fio2_set", "peep_set", "tidal_volume_set",
+                            "pressure_support_set", "resp_rate_set"] if c in rs.columns]
+    rs = rs.sort_values(["hospitalization_id", "recorded_dttm"] + _content,
+                        na_position="last", kind="stable").reset_index(drop=True)
     wf = clifpy.process_resp_support_waterfall(
         rs, id_col="hospitalization_id", bfill=False, verbose=verbose,
     )

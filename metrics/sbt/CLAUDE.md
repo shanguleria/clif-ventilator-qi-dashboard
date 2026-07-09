@@ -131,7 +131,10 @@ federation summary row (`sbt_delivered_legacy`).
   `.version` sidecar that auto-rebuilds on a `WATERFALL_VERSION` bump; rebuild cost ~35–45 min.
 
 ### Unit & time-period slicing (dashboard filters)
-- **Unit** = ICU `location_type` of the patient-day (attached per day in 01).
+- **Unit** = the ICU `location_type` the patient **started the ICU-day in** — the earliest ICU
+  interval of the day (min `day_in`), attached in `01`. Unique per (block, day) → deterministic/tie-free
+  (superseding the old max-overlap pick; see the determinism note). Matches SAT and proning. Changing
+  the rule redistributes per-unit cells but leaves site-wide totals unchanged.
 - **Time period** keys by the patient-day's calendar date: month `"YYYY-MM"` and ISO week
   `"YYYY-Www"` — both in the tile grain `["all","month","week"]` (weekly added 2026-06-04; SBT weekly
   denominators are robust, `__ALL__` median ~114 patient-days/week, so the scorecard answers week picks

@@ -84,8 +84,14 @@ the distribution (median, IQR) and the **% restarted at ≤ 50% of prior dose** 
 is a dashboard figure + site-summary rows only — it stays **off** the headline tile.
 
 ### Unit & time-period slicing (dashboard filters)
-- **Unit** = ICU `location_type` of the patient-day's ICU interval (DuckDB range-join on stitched
-  `adt`); a day with no ICU `location_type` → `"unknown"` (folded into `__ALL__` for the tile).
+- **Unit** = the ICU `location_type` the patient **started the ICU-day in** — the earliest ICU
+  interval of the day (min `day_in`), attached in `01`. ADT locations are mutually exclusive, so this
+  is unique per (block, day) → deterministic/tie-free (superseding the old max-overlap pick, which had
+  no tie-break and could flip on row order; see the determinism note below). Clinically apt: SAT is
+  morning/nursing-driven, so the unit that owns the trial opportunity is the start-of-day unit; this
+  also matches proning's single-instant unit attribution. A day with no ICU `location_type` →
+  `"unknown"` (folded into `__ALL__` for the tile). Changing the rule redistributes per-unit cells but
+  leaves site-wide totals unchanged.
 - **Time period** keys by the patient-day's calendar date: month `"YYYY-MM"`, ISO week `"YYYY-Www"`.
   Each granularity partitions the patient-days exactly.
 - Tile-feed grain: `units:[__ALL__ + canonical ICU slugs present]`, `periods:["all","month","week"]`

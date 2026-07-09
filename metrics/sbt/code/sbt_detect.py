@@ -199,8 +199,14 @@ def hourly_stability_window(wf: pd.DataFrame, days: pd.DataFrame,
     sp = spo2[["encounter_block", "t", "spo2"]].copy()
     sp["encounter_block"] = sp["encounter_block"].astype(str)
     sp["t"] = _tz(sp["t"])
-    sp = sp.dropna(subset=["t"]).sort_values("t")
+    sp = sp.dropna(subset=["t"])
     if not sp.empty:
+        # DETERMINISM: vitals can chart >1 SpO2 at the same instant; merge_asof breaks ties by input
+        # ROW ORDER, so collapse to one value per (block, t) first — min = conservative for a
+        # `SpO2 >= spo2_min` stability screen (won't over-call stability). The subsequent global
+        # t-sort satisfies merge_asof's monotonicity requirement.
+        sp = (sp.groupby(["encounter_block", "t"], as_index=False)["spo2"].min()
+                .sort_values("t"))
         sh = pd.merge_asof(sh, sp, by="encounter_block", on="t",
                            direction="backward", tolerance=pd.Timedelta(hours=1))
     else:
@@ -213,8 +219,14 @@ def hourly_stability_window(wf: pd.DataFrame, days: pd.DataFrame,
     ne["encounter_block"] = ne["encounter_block"].astype(str)
     if not ne.empty:
         ne["t"] = _tz(ne["t"])
-    ne = ne.dropna(subset=["t"]).sort_values("t")
+    ne = ne.dropna(subset=["t"])
     if not ne.empty:
+        # DETERMINISM: collapse any duplicate (block, t) NEE steps before the asof merge — max NEE =
+        # conservative (highest pressor dose, hardest to be "stable"); assessable via min so an
+        # un-assessable duplicate dominates. Then global t-sort for merge_asof monotonicity.
+        ne = (ne.groupby(["encounter_block", "t"], as_index=False)
+                .agg(ne_equiv=("ne_equiv", "max"), assessable=("assessable", "min"))
+                .sort_values("t"))
         sh = pd.merge_asof(sh, ne, by="encounter_block", on="t", direction="backward")
     else:
         sh["ne_equiv"] = np.nan
@@ -238,6 +250,13 @@ def hourly_stability_window(wf: pd.DataFrame, days: pd.DataFrame,
         sh["fio2_set"].notna() & sh["peep_set"].notna() &
         sh["spo2"].notna() & sh["ne_assessable"]
     )
+
+    # DETERMINISM: a stitched block can carry two scaffold rows for the same hour (overlapping
+    # hospitalizations, ~0.1% of scaffold rows). Collapse to one stability state per (block, day,
+    # hour) with AND semantics (min) — a block-hour counts as stable/assessable only if every
+    # colliding row is — so the run-length pass sees a unique, order-invariant (block, day, t).
+    _bcols = ["stable_h", "stable_h_no_ne", "stable_h_ne_only", "assessable_h"]
+    sh = sh.groupby(["encounter_block", "icu_day", "t"], as_index=False)[_bcols].min()
 
     # Run-length over consecutive stable scaffold hours per (block, day).
     sh = sh.sort_values(["encounter_block", "icu_day", "t"]).reset_index(drop=True)
@@ -331,6 +350,11 @@ def support_transitions(wf: pd.DataFrame, cfg: dict, imv_category: str = "imv") 
         return pd.DataFrame(columns=cols)
     nat = nat.sort_values(["encounter_block", "recorded_dttm"]).reset_index(drop=True)
     nat["cls"] = _row_mode_class(nat, cfg, imv_category)
+    # DETERMINISM: native rows can share an exact (block, recorded_dttm) with a DIFFERENT mode
+    # class; their relative order would otherwise decide where the RLE splits episodes (and thus how
+    # many controlled->support transitions appear). Sort `cls` into the tie so equal-timestamp rows
+    # resolve to a fixed order; any remaining ties are same-class (interchangeable for the RLE).
+    nat = nat.sort_values(["encounter_block", "recorded_dttm", "cls"]).reset_index(drop=True)
 
     # Native segment ends = next native row of the block; trailing capped.
     nat["seg_end"] = nat.groupby("encounter_block")["recorded_dttm"].shift(-1)
@@ -386,6 +410,9 @@ def support_episodes(wf: pd.DataFrame, cfg: dict, imv_category: str = "imv") -> 
         return pd.DataFrame(columns=cols)
     nat = nat.sort_values(["encounter_block", "recorded_dttm"]).reset_index(drop=True)
     nat["cls"] = _row_mode_class(nat, cfg, imv_category)
+    # DETERMINISM: see support_transitions — pin equal-(block, recorded_dttm) rows by mode class so
+    # the episode RLE is order-invariant.
+    nat = nat.sort_values(["encounter_block", "recorded_dttm", "cls"]).reset_index(drop=True)
     nat["seg_end"] = nat.groupby("encounter_block")["recorded_dttm"].shift(-1)
     nat["seg_end"] = nat["seg_end"].fillna(nat["recorded_dttm"] + TRAILING_NATIVE_CAP)
 
@@ -398,7 +425,9 @@ def support_episodes(wf: pd.DataFrame, cfg: dict, imv_category: str = "imv") -> 
                  ep_start=("recorded_dttm", "min"),
                  ep_end=("seg_end", "max"))
             .reset_index(drop=True))
-    ep = ep.sort_values(["encounter_block", "ep_start"]).reset_index(drop=True)
+    # DETERMINISM: tie-break episodes sharing an ep_start so prev_cls (the controlled->support edge
+    # test) is order-invariant.
+    ep = ep.sort_values(["encounter_block", "ep_start", "ep_end", "cls"]).reset_index(drop=True)
     ep["prev_cls"] = ep.groupby("encounter_block")["cls"].shift()
 
     is_supp = ep["cls"].isin(["sbt_ps", "sbt_cpap", "support_other"])
@@ -466,7 +495,9 @@ def support_minutes_days(wf: pd.DataFrame, days: pd.DataFrame, cfg: dict) -> pd.
 
     w = wf.dropna(subset=["encounter_block", "recorded_dttm"]).copy()
     w["encounter_block"] = w["encounter_block"].astype(str)
-    w = w.sort_values(["encounter_block", "recorded_dttm"])
+    # DETERMINISM: pin same-(block, recorded_dttm) rows by mode_category so which row carries the
+    # real shift(-1) segment (support vs not) is order-invariant; same-mode ties are interchangeable.
+    w = w.sort_values(["encounter_block", "recorded_dttm", "mode_category"])
     w["seg_end"] = w.groupby("encounter_block")["recorded_dttm"].shift(-1)
     w["seg_end"] = w["seg_end"].fillna(w["recorded_dttm"] + TRAILING_NATIVE_CAP)
     supp = w[w["mode_category"].astype("string").str.lower().isin(support_modes(cfg))][
@@ -546,7 +577,11 @@ def paralytic_day_flag(mac: pd.DataFrame, days: pd.DataFrame, cfg: dict, tz: str
     else:
         df["__stop"] = False
 
-    df = df.sort_values(["encounter_block", "admin_dttm"])
+    # DETERMINISM: pin same-(block, admin_dttm) records so which row carries the shift(-1) interval
+    # is order-invariant. Tie-break puts non-stop before stop, then ascending dose, so a same-instant
+    # start+stop conflict resolves the same way every run (this flag drives the excluded_paralytic
+    # eligibility exclusion, so an unpinned tie could move the denominator).
+    df = df.sort_values(["encounter_block", "admin_dttm", "__stop", "med_dose"])
     df["seg_end"] = df.groupby("encounter_block")["admin_dttm"].shift(-1)
     df["seg_end"] = df["seg_end"].fillna(df["admin_dttm"] + PARALYTIC_TRAILING_CAP)
     on = df[(df["med_dose"].fillna(0) > 0) & (~df["__stop"]) & (df["seg_end"] > df["admin_dttm"])][
