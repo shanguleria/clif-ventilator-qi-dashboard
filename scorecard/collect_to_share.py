@@ -65,6 +65,8 @@ def main() -> None:
     manifest: dict = {
         "site_id": None,
         "code_version": _git_sha(),
+        "as_of": _bc.resolve_as_of(site=site),
+        "data_version": _bc.resolve_data_version(site=site),
         "generated": datetime.now(timezone.utc).isoformat(timespec="minutes"),
         "enabled_metrics": list(metrics),
         "metrics": {},

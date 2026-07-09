@@ -365,6 +365,8 @@ def build_tile_feed(cfg: dict, m: dict, slices: pd.DataFrame, diag: dict) -> dic
             "code_version": _git_sha(),
             "clif_version": cfg.get("primary_dataset", {}).get("clif_version"),
             "definition_version": DEFINITION_VERSION,
+            "as_of": cfg.get("as_of"),
+            "data_version": cfg.get("data_version"),
             "generated": m["generated"],
         },
     }

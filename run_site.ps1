@@ -5,13 +5,17 @@ recombine (refresh_scorecard.ps1). Appends one row PER PHASE to output/<site>/ru
 phase finishes (long format), so an interrupted run keeps whatever completed. Prints a summary.
 
 Usage:
-  .\run_site.ps1 -Site <id>              # or set $env:CLIF_SITE first
+  .\run_site.ps1 -Site <id> [-AsOf YYYY-MM-DD]   # or set $env:CLIF_SITE / $env:CLIF_AS_OF first
 #>
-param([string]$Site = $(if ($env:CLIF_SITE) { $env:CLIF_SITE } else { "uchicago" }))
+param(
+  [string]$Site = $(if ($env:CLIF_SITE) { $env:CLIF_SITE } else { "uchicago" }),
+  [string]$AsOf = $(if ($env:CLIF_AS_OF) { $env:CLIF_AS_OF } else { "" })   # data-snapshot date -> feed provenance
+)
 
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
 $env:CLIF_SITE = $Site
+if ($AsOf) { $env:CLIF_AS_OF = $AsOf }
 $env:TIMING_SUPPRESS = "1"   # run_site owns timing; stop run_bundle from logging its own duplicate row
 
 $PY = Join-Path ".venv" "Scripts\python.exe"

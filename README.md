@@ -164,12 +164,38 @@ scorecard end-to-end, **times each phase**, and appends a row per phase (plus a 
 row + prints its elapsed — so even the LPV-only build records its time.)
 
 ```bash
-./run_site.sh --site <site>              # macOS/Linux   (Windows: .\run_site.ps1 -Site <site>)
+./run_site.sh --site <site>                       # macOS/Linux   (Windows: .\run_site.ps1 -Site <site>)
+./run_site.sh --site <site> --as-of 2026-07-01    # stamp the data-snapshot date into feed provenance
 open output/<site>/dashboard/scorecard.html
 ```
 
-First run builds the ~35-min-each respiratory-support waterfalls (cached afterward), so budget ~1.5–2 h
-cold, minutes warm; a timing summary prints at the end.
+First run builds a **single shared respiratory-support waterfall** (~40 min; cached afterward under
+`output/<site>/_shared/` and reused by proning/sat/sbt), so budget **~40–60 min cold, ~10 min warm**; a
+timing summary prints at the end and is appended to `output/<site>/run_timings.csv`.
+
+**Reproducibility:** the build is row-order deterministic — same data in, same numbers out, at every site
+(see [`docs/determinism.md`](docs/determinism.md)). `--as-of YYYY-MM-DD` (or the `CLIF_AS_OF` env var, or
+`as_of` in `sites/<site>.json`) records *which data snapshot* a build reflects; it is stamped into every
+tile feed's `provenance` block and the `output_to_share/manifest.json`, and reads no CLIF data.
+
+### Scheduling routine refreshes
+The scorecard has no incremental mode — a refresh is just a re-run of `run_site` (warm ≈ 10 min, since the
+waterfall is cached). Schedule it and pass the snapshot date so provenance stays honest:
+
+```bash
+# cron (macOS/Linux) — 1st of each month at 02:00; flock prevents overlapping runs
+0 2 1 * * cd /path/to/clif-ventilator-qi-dashboard && flock -n .refresh.lock \
+  ./run_site.sh --site <site> --as-of "$(date +\%Y-\%m-01)" >> output/<site>/logs/refresh.log 2>&1
+```
+
+```powershell
+# Windows Task Scheduler — register a monthly task
+$act = New-ScheduledTaskAction -Execute "pwsh" -Argument "-File C:\path\run_site.ps1 -Site <site> -AsOf (Get-Date -Format yyyy-MM-01)"
+Register-ScheduledTask -TaskName "CLIF-QI-refresh" -Action $act -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday -At 2am)
+```
+
+The waterfall auto-rebuilds only when `WATERFALL_VERSION` changes; a definition or code change is a normal
+re-run. When in doubt, a full `run_site` is always the correct, complete refresh.
 
 **LPV-only building block:** `run_bundle.sh` builds just the LPV pipeline → scorecard → methods docs →
 `output_to_share/` (it's what `run_site.sh` calls for phase 1). Handy when only LPV changed:
