@@ -158,27 +158,18 @@ def stitch_cached(co: clifpy.ClifOrchestrator) -> tuple[pd.DataFrame, pd.DataFra
 # ---------------------------------------------------------------------------
 # Respiratory waterfall (cached — expensive ~35 min step)
 # ---------------------------------------------------------------------------
-def waterfall_cached(
-    co: clifpy.ClifOrchestrator,
-    abg_df: pd.DataFrame,
-    mapping: pd.DataFrame,
-    tz: str,
-) -> tuple[pd.DataFrame, str]:
-    """Level-1 waterfall via the shared common.resp_support.build_waterfall, at proning's ABG-having
-    scope. Cleaning (CLIF-spec outlier ranges + FiO2 percent→fraction detect + device/mode lowercase)
-    now happens PRE-waterfall inside load_clean; the old post-hoc _normalize_waterfall step is gone
-    (it survives only for the diagnostic probes). Still caches to CACHE_DIR/resp_waterfall.parquet, the
-    exact path stages 02/02b read — a `.version` sidecar auto-rebuilds it on a WATERFALL_VERSION bump."""
-    from common.resp_support import build_waterfall
-
-    abg_hosp_ids = abg_df["hospitalization_id"].dropna().astype(str).unique().tolist()
-    log.info("waterfall scope: %d hospitalizations (ABG-having)", len(abg_hosp_ids))
-    wf = build_waterfall(
-        co.data_directory, co.filetype, tz, abg_hosp_ids, mapping,
-        cache_dir=CACHE_DIR, cache_name="resp_waterfall",
-        waterfall_version=_bc.WATERFALL_VERSION,
-    )
-    return wf, f"common.build_waterfall (wf={_bc.WATERFALL_VERSION})"
+def waterfall_cached(wf_shared: pd.DataFrame, abg_df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+    """Filter the shared union waterfall (common.build_shared.ensure_shared) to proning's ABG-having
+    scope and write the stage-local slice to CACHE_DIR/resp_waterfall.parquet — the exact path stages
+    02/02b read. Cleaning already happened PRE-waterfall inside load_clean (the shared build), so no
+    post-hoc normalize here (matches the pre-consolidation behavior); the returned slice is byte-identical
+    to proning's old per-vertical build filtered to the same hosp-ids (verified 0-diff at consolidation)."""
+    abg_hosp_ids = set(abg_df["hospitalization_id"].dropna().astype(str).unique())
+    wf = wf_shared[wf_shared["hospitalization_id"].astype(str).isin(abg_hosp_ids)].copy()
+    log.info("waterfall: filtered shared union to %d ABG-having hospitalizations (%d rows)",
+             len(abg_hosp_ids), len(wf))
+    wf.to_parquet(cpath("resp_waterfall"), index=False)
+    return wf, f"shared union (wf={_bc.WATERFALL_VERSION})"
 
 
 def _normalize_waterfall(wf: pd.DataFrame, tz: str) -> pd.DataFrame:
@@ -446,10 +437,11 @@ def main() -> None:
 
     screen = cfg.get("ards_cohort", {})
     co = build_orchestrator(cfg)
-    load_small_tables(co)
-    hosp_s, adt_s, mapping = stitch_cached(co)
+    from common.build_shared import ensure_shared
+    wf_shared, mapping, hosp_s, adt_s = ensure_shared(
+        co, tz, _SITE, waterfall_version=_bc.WATERFALL_VERSION)
     abg_df = load_abgs_cached(co)
-    wf, fio2_note = waterfall_cached(co, abg_df, mapping, tz)
+    wf, fio2_note = waterfall_cached(wf_shared, abg_df)
 
     abg = extract_abgs(abg_df, mapping)
     pf = attach_vent_and_compute_pf(abg, wf, tz)

@@ -149,22 +149,22 @@ def _normalize_waterfall(wf: pd.DataFrame, tz: str) -> pd.DataFrame:
     return wf
 
 
-def waterfall_cached(co: clifpy.ClifOrchestrator, scope_hosp_ids: list[str],
-                     mapping: pd.DataFrame, tz: str) -> pd.DataFrame:
-    """Level-1 waterfall via the shared common.resp_support.build_waterfall, over SBT's FULL ICU scope
-    (all ICU∩IMV blocks, incl. never-sedated — the population SAT's sedation-scoped cache dropped).
-    Cleaning happens PRE-waterfall inside load_clean; the cache is written cleaned to
-    CACHE_DIR/resp_waterfall.parquet (the path stages 02/03 read), with a `.version` sidecar that
-    auto-rebuilds on a WATERFALL_VERSION bump — an old sidecar-less cache is treated as a miss.
-    `_normalize_waterfall` is retained (stages 02/03 re-apply it; idempotent on the cleaned cache)."""
-    from common.resp_support import build_waterfall
-
-    log.info("waterfall scope: %d hospitalizations (all ICU)", len(scope_hosp_ids))
-    wf = build_waterfall(
-        co.data_directory, co.filetype, tz, scope_hosp_ids, mapping,
-        cache_dir=CACHE_DIR, cache_name="resp_waterfall",
-        waterfall_version=_bc.WATERFALL_VERSION,
-    )
+def waterfall_cached(wf_shared: pd.DataFrame, scope_hosp_ids: list[str], tz: str) -> pd.DataFrame:
+    """Filter the shared union waterfall (common.build_shared.ensure_shared) to SBT's FULL ICU scope
+    (all ICU∩IMV blocks, incl. never-sedated), write the stage-local slice to
+    CACHE_DIR/resp_waterfall.parquet (the path stages 02/03 read), and return it normalized. Cleaning
+    already happened PRE-waterfall inside load_clean (the shared build); `_normalize_waterfall` is
+    idempotent and kept so stages 02/03 (which re-read + re-apply it) are unchanged. The filtered slice
+    is byte-identical to SBT's old per-vertical build (verified 0-diff at consolidation)."""
+    scope = set(map(str, scope_hosp_ids))
+    wf = wf_shared[wf_shared["hospitalization_id"].astype(str).isin(scope)].copy()
+    # The shared waterfall carries encounter_block as float64 (int block-id + NaN from the left-merge);
+    # SBT keys ICU intervals on a clean int-string encounter_block ("110135"), so cast to match — else
+    # the str-vs-float imv∩icu join silently yields zero.
+    wf["encounter_block"] = wf["encounter_block"].astype("Int64").astype(str)
+    log.info("waterfall: filtered shared union to %d hospitalizations (all ICU; %d rows)",
+             len(scope), len(wf))
+    wf.to_parquet(cpath("resp_waterfall"), index=False)
     return _normalize_waterfall(wf, tz)
 
 
@@ -344,21 +344,22 @@ def main() -> None:
     log.info("site=%s timezone=%s", cfg.get("site"), tz)
 
     co = build_orchestrator(cfg)
-    load_small_tables(co)
-    hosp_s, adt_s, mapping = stitch_cached(co)
+    from common.build_shared import ensure_shared
+    wf_shared, mapping, hosp_s, adt_s = ensure_shared(
+        co, tz, _SITE, waterfall_version=_bc.WATERFALL_VERSION)
     mapping["encounter_block"] = mapping["encounter_block"].astype(str)
     mapping["hospitalization_id"] = mapping["hospitalization_id"].astype(str)
 
     icu = build_icu_intervals(adt_s, mapping, tz)
 
-    # Full-rebuild scope (only used when no cached waterfall): all ICU hospitalizations.
+    # SBT's waterfall scope = all ICU hospitalizations (filtered from the shared union waterfall).
     icu_blocks = set(icu["encounter_block"].unique())
     scope_hosp_ids = sorted(
         mapping.loc[mapping["encounter_block"].isin(icu_blocks), "hospitalization_id"].unique())
-    log.info("scope: %d ICU encounter_blocks (%d hospitalizations) for any waterfall rebuild",
+    log.info("scope: %d ICU encounter_blocks (%d hospitalizations)",
              len(icu_blocks), len(scope_hosp_ids))
 
-    wf = waterfall_cached(co, scope_hosp_ids, mapping, tz)
+    wf = waterfall_cached(wf_shared, scope_hosp_ids, tz)
 
     imv = build_imv_intervals(wf)
     vint = intersect_imv_icu(imv, icu)

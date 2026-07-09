@@ -237,12 +237,13 @@ def main() -> None:
     log.info("loaded cohort: %d encounters / %d patients",
              cohort["encounter_block"].nunique(), cohort["patient_id"].nunique())
 
-    # Reuse cohort module's cached IO — fast since 01 already populated _cache/
+    # Reuse cohort module's cached IO — fast since 01 already populated _cache/ and the shared build.
     co = cohort_mod.build_orchestrator(cfg)
-    cohort_mod.load_small_tables(co)
-    hosp_s, adt_s, mapping = cohort_mod.stitch_cached(co)
+    from common.build_shared import ensure_shared
+    wf_shared, mapping, hosp_s, adt_s = ensure_shared(
+        co, tz, cohort_mod._SITE, waterfall_version=cohort_mod._bc.WATERFALL_VERSION)
     abg_df = cohort_mod.load_abgs_cached(co)
-    wf, _ = cohort_mod.waterfall_cached(co, abg_df, mapping, tz)
+    wf, _ = cohort_mod.waterfall_cached(wf_shared, abg_df)
     abg = cohort_mod.extract_abgs(abg_df, mapping)
     pf = cohort_mod.attach_vent_and_compute_pf(abg, wf, tz)
     pf_icu = cohort_mod.restrict_to_icu(pf, adt_s)
