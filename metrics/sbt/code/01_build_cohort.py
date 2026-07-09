@@ -8,16 +8,17 @@ applied in 02).
 
 Pipeline:
     patient/hospitalization/adt   -> stitch encounters (cached)
-    respiratory_support           -> waterfall (cached; SEEDED from the SAT vertical)
+    respiratory_support           -> waterfall (shared common.resp_support.build_waterfall)
     waterfall                     -> IMV intervals (consecutive-row segmentation)
     IMV  ∩  ICU adt intervals     -> ventilated-ICU intervals (+ location_type unit)
     intervals                     -> expand to calendar days -> cohort.parquet
 
-The expensive respiratory_support waterfall is REUSED from the SAT vertical's warm
-`_cache/` (config `cohort.seed_cache_from`): SBT's cohort is the same vent-ICU
-patient-day universe. Set seed_cache_from to null + run --refresh-waterfall to build
-the full ICU∩IMV waterfall from scratch (the seeded cache is scoped to ICU ∩
-SAT-sedation hospitalizations; see CLAUDE.md). No raw PHI is printed.
+SBT builds its OWN full ICU∩IMV respiratory_support waterfall (all ICU∩IMV blocks,
+including never-sedated patients) via the shared `common.resp_support.build_waterfall`
+— it no longer seeds from the SAT vertical's SAT-sedation-scoped cache, which silently
+dropped never-sedated ventilated-ICU patients. The waterfall is cached in `_cache/`
+with a `.version` sidecar that auto-rebuilds on a WATERFALL_VERSION bump. No raw PHI
+is printed.
 
 Machinery adapted from ../sat/code/01_build_cohort.py so this vertical stays
 self-contained for federation.
@@ -55,8 +56,6 @@ LOGS_DIR = OUTPUT_DIR / "logs"
 IMV_CATEGORY = "imv"            # UChicago stores device_category lowercase
 ICU_CATEGORY = "icu"
 TRAILING_IMV_CAP_H = 24
-# Cache parquets reused across SBT runs (and seedable from a sibling metric).
-SEED_FILES = ("resp_waterfall", "encounter_mapping", "hosp_stitched", "adt_stitched")
 
 log = logging.getLogger("sbt.cohort")
 
@@ -96,26 +95,6 @@ def _coerce_dttm(series: pd.Series, tz: str) -> pd.Series:
     else:
         s = s.dt.tz_convert(tz)
     return s
-
-
-def seed_cache(cfg: dict) -> None:
-    """Copy a sibling metric's warm cache parquets into our _cache/ on first run so
-    the ~35-min respiratory_support waterfall is reused. Idempotent — only copies a
-    file that is missing locally."""
-    src = (cfg.get("cohort") or {}).get("seed_cache_from")
-    if not src:
-        return
-    src_dir = (PROJECT_ROOT / src).resolve() if not Path(src).is_absolute() else Path(src)
-    if not src_dir.exists():
-        log.warning("seed_cache_from path does not exist: %s (will build from scratch)", src_dir)
-        return
-    _ensure_dirs()
-    for name in SEED_FILES:
-        dst = cpath(name)
-        srcf = src_dir / f"{name}.parquet"
-        if not dst.exists() and srcf.exists():
-            shutil.copyfile(srcf, dst)
-            log.info("seeded cache: %s  <- %s", dst.name, srcf)
 
 
 # ---------------------------------------------------------------------------
@@ -172,23 +151,20 @@ def _normalize_waterfall(wf: pd.DataFrame, tz: str) -> pd.DataFrame:
 
 def waterfall_cached(co: clifpy.ClifOrchestrator, scope_hosp_ids: list[str],
                      mapping: pd.DataFrame, tz: str) -> pd.DataFrame:
-    if cpath("resp_waterfall").exists():
-        log.info("cache hit: resp_waterfall  <- the expensive step (seeded from SAT)")
-        wf = pd.read_parquet(cpath("resp_waterfall"))
-        return _normalize_waterfall(wf, tz)
+    """Level-1 waterfall via the shared common.resp_support.build_waterfall, over SBT's FULL ICU scope
+    (all ICU∩IMV blocks, incl. never-sedated — the population SAT's sedation-scoped cache dropped).
+    Cleaning happens PRE-waterfall inside load_clean; the cache is written cleaned to
+    CACHE_DIR/resp_waterfall.parquet (the path stages 02/03 read), with a `.version` sidecar that
+    auto-rebuilds on a WATERFALL_VERSION bump — an old sidecar-less cache is treated as a miss.
+    `_normalize_waterfall` is retained (stages 02/03 re-apply it; idempotent on the cleaned cache)."""
+    from common.resp_support import build_waterfall
 
-    log.info("waterfall input scope: %d hospitalizations (all ICU)", len(scope_hosp_ids))
-    co.load_table("respiratory_support", filters={"hospitalization_id": scope_hosp_ids})
-    rs = co.respiratory_support.df
-    rs["hospitalization_id"] = rs["hospitalization_id"].astype(str)
-    log.info("loaded respiratory_support: %d rows", len(rs))
-
-    wf = clifpy.process_resp_support_waterfall(rs, id_col="hospitalization_id", bfill=False, verbose=True)
-    wf["hospitalization_id"] = wf["hospitalization_id"].astype(str)
-    wf = wf.merge(mapping[["hospitalization_id", "encounter_block"]].astype({"hospitalization_id": str}),
-                  on="hospitalization_id", how="left")
-    wf.to_parquet(cpath("resp_waterfall"), index=False)
-    log.info("wrote cache: resp_waterfall (%d rows)", len(wf))
+    log.info("waterfall scope: %d hospitalizations (all ICU)", len(scope_hosp_ids))
+    wf = build_waterfall(
+        co.data_directory, co.filetype, tz, scope_hosp_ids, mapping,
+        cache_dir=CACHE_DIR, cache_name="resp_waterfall",
+        waterfall_version=_bc.WATERFALL_VERSION,
+    )
     return _normalize_waterfall(wf, tz)
 
 
@@ -366,10 +342,6 @@ def main() -> None:
     cfg = load_config()
     tz = cfg["timezone"]
     log.info("site=%s timezone=%s", cfg.get("site"), tz)
-
-    # Seed the warm cache from a sibling metric (unless we're forcing a rebuild).
-    if not args.refresh and not args.refresh_waterfall:
-        seed_cache(cfg)
 
     co = build_orchestrator(cfg)
     load_small_tables(co)

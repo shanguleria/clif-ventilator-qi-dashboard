@@ -192,23 +192,20 @@ def _normalize_waterfall(wf: pd.DataFrame, tz: str) -> pd.DataFrame:
 
 def waterfall_cached(co: clifpy.ClifOrchestrator, scope_hosp_ids: list[str],
                      mapping: pd.DataFrame, tz: str) -> pd.DataFrame:
-    if cpath("resp_waterfall").exists():
-        log.info("cache hit: resp_waterfall  <- the expensive step")
-        wf = pd.read_parquet(cpath("resp_waterfall"))
-        return _normalize_waterfall(wf, tz)
+    """Level-1 waterfall via the shared common.resp_support.build_waterfall, at SAT's ICU+sedation
+    scope. Cleaning (CLIF-spec outlier ranges + FiO2 percent→fraction detect + device/mode lowercase)
+    now happens PRE-waterfall inside load_clean; the cache is written cleaned. Still caches to
+    CACHE_DIR/resp_waterfall.parquet (the exact path stage 03 reads), with a `.version` sidecar that
+    auto-rebuilds it on a WATERFALL_VERSION bump — an old sidecar-less cache is treated as a miss.
+    `_normalize_waterfall` is retained (stage 03 re-applies it; it is idempotent on the cleaned cache)."""
+    from common.resp_support import build_waterfall
 
-    log.info("waterfall input scope: %d hospitalizations (ICU + sedation)", len(scope_hosp_ids))
-    co.load_table("respiratory_support", filters={"hospitalization_id": scope_hosp_ids})
-    rs = co.respiratory_support.df
-    rs["hospitalization_id"] = rs["hospitalization_id"].astype(str)
-    log.info("loaded respiratory_support: %d rows", len(rs))
-
-    wf = clifpy.process_resp_support_waterfall(rs, id_col="hospitalization_id", bfill=False, verbose=True)
-    wf["hospitalization_id"] = wf["hospitalization_id"].astype(str)
-    wf = wf.merge(mapping[["hospitalization_id", "encounter_block"]].astype({"hospitalization_id": str}),
-                  on="hospitalization_id", how="left")
-    wf.to_parquet(cpath("resp_waterfall"), index=False)   # cache raw-ish, pre-normalization
-    log.info("wrote cache: resp_waterfall (%d rows)", len(wf))
+    log.info("waterfall scope: %d hospitalizations (ICU + sedation)", len(scope_hosp_ids))
+    wf = build_waterfall(
+        co.data_directory, co.filetype, tz, scope_hosp_ids, mapping,
+        cache_dir=CACHE_DIR, cache_name="resp_waterfall",
+        waterfall_version=_bc.WATERFALL_VERSION,
+    )
     return _normalize_waterfall(wf, tz)
 
 
