@@ -169,9 +169,10 @@ row + prints its elapsed — so even the LPV-only build records its time.)
 open output/<site>/dashboard/scorecard.html
 ```
 
-First run builds a **single shared respiratory-support waterfall** (~40 min; cached afterward under
-`output/<site>/_shared/` and reused by proning/sat/sbt), so budget **~40–60 min cold, ~10 min warm**; a
-timing summary prints at the end and is appended to `output/<site>/run_timings.csv`.
+First run builds a **single shared respiratory-support waterfall** (cached afterward under
+`output/<site>/_shared/` and reused by proning/sat/sbt), so budget **~20 min cold (hardware-dependent),
+~10 min warm** — a full cold build has been observed in ~13 min on a fast workstation. A timing summary
+prints at the end and is appended to `output/<site>/run_timings.csv`.
 
 **Reproducibility:** the build is row-order deterministic — same data in, same numbers out, at every site
 (see [`docs/determinism.md`](docs/determinism.md)). `--as-of YYYY-MM-DD` (or the `CLIF_AS_OF` env var, or
@@ -213,7 +214,8 @@ Invoke-Item output\<site>\dashboard\scorecard.html
 ```
 
 **The other three metrics (proning / sat / sbt) are their own pipelines** — run their stages under the
-same `CLIF_SITE` (each builds a respiratory-support waterfall on first run, ~35 min, cached thereafter):
+same `CLIF_SITE` (they share the one respiratory-support waterfall built by stage 01 and cached in
+`output/<site>/_shared/`, so only the first vertical's first run pays the waterfall cost):
 
 ```bash
 for m in proning sat sbt; do for s in metrics/$m/code/0*.py; do CLIF_SITE=<site> .venv/bin/python "$s"; done; done
@@ -360,7 +362,7 @@ cp sites/uchicago.example.json sites/site3.json         # set site_id, data_path
 CLIF_SITE=site3 .venv/bin/python metrics/lpv/code/00_probe_missingness.py    # device/mode categories, plateau/height coverage
 CLIF_SITE=site3 .venv/bin/python metrics/sat/code/00_probe_documentation.py  # med_category drug inventory
 
-# 4. build all four metrics (timed; first run builds the ~35-min-each waterfalls)
+# 4. build all four metrics (timed; first run builds the one shared waterfall, ~20 min cold)
 ./run_site.sh --site site3                               # LPV + proning + sat + sbt + scorecard; timing -> output/site3/run_timings.csv
 
 open output/site3/dashboard/scorecard.html
