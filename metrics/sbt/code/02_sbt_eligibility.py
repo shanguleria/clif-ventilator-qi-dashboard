@@ -90,7 +90,10 @@ def main() -> None:
              len(wf), int(wf["is_scaffold"].fillna(False).sum()))
 
     # ---- hosp ids + mapping for vitals/meds loads ----
-    mapping = pd.read_parquet(cohort_mod.cpath("encounter_mapping"))
+    # encounter_mapping lives in the SHARED cache (written by common.build_shared.ensure_shared in
+    # stage 01); the sbt-local _cache/ copy is no longer produced after the 2a rewire.
+    mapping = pd.read_parquet(
+        cohort_mod._bc.shared_cache_dir(cohort_mod._SITE) / "encounter_mapping.parquet")
     mapping["hospitalization_id"] = mapping["hospitalization_id"].astype(str)
     mapping["encounter_block"] = mapping["encounter_block"].astype(str)
     map_cohort = mapping[mapping["encounter_block"].isin(cohort_blocks)]
