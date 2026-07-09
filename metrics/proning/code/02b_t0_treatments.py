@@ -220,7 +220,10 @@ def main() -> None:
 
     # Map hospitalization_id → encounter_block via the cached stitch mapping.
     if not mac.empty:
-        mapping = pd.read_parquet(cohort_mod.CACHE_DIR / "encounter_mapping.parquet")
+        # encounter_mapping lives in the SHARED cache (written by common.build_shared.ensure_shared in
+        # stage 01); the proning-local _cache/ copy is no longer produced after the 2a rewire.
+        mapping = pd.read_parquet(
+            cohort_mod._bc.shared_cache_dir(cohort_mod._SITE) / "encounter_mapping.parquet")
         h2b = (mapping.assign(hospitalization_id=lambda d: d["hospitalization_id"].astype(str))
                .set_index("hospitalization_id")["encounter_block"])
         mac["hospitalization_id"] = mac["hospitalization_id"].astype(str)

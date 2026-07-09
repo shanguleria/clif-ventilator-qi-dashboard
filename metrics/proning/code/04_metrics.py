@@ -323,7 +323,9 @@ def attach_unit_and_periods(pl: pd.DataFrame, cohort_mod, tz: str) -> pd.DataFra
     with no containing ICU interval (T_eligible in a brief non-ICU gap) → "unknown".
     Period keys bucket by T_eligible, the PROSEVA decision-point.
     """
-    adt = pd.read_parquet(cohort_mod.CACHE_DIR / "adt_stitched.parquet")
+    # adt_stitched lives in the SHARED cache (written by common.build_shared.ensure_shared in stage 01);
+    # the proning-local _cache/ copy is no longer produced after the 2a rewire.
+    adt = pd.read_parquet(cohort_mod._bc.shared_cache_dir(cohort_mod._SITE) / "adt_stitched.parquet")
     adt["location_category"] = adt["location_category"].astype("string").str.strip().str.lower()
     icu = adt.loc[adt["location_category"] == "icu",
                   ["encounter_block", "in_dttm", "out_dttm", "location_type", "location_name"]].copy()
