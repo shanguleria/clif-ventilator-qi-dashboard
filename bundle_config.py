@@ -66,6 +66,19 @@ def feeds_dir(site: str | None = None) -> Path:
     return output_root(site) / "feeds"
 
 
+def shared_cache_dir(site: str | None = None) -> Path:
+    """Cross-metric cache (NOT per-metric): the shared Level-1 respiratory_support waterfall lives here
+    so proning/sat/sbt reuse one build. Keyed filenames (scope+version) prevent the narrow-scope reuse
+    that the old per-metric fixed-path cache allowed."""
+    d = output_root(site) / "_shared"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# Bump when the shared waterfall's build/cleaning logic changes (invalidates the cached waterfall).
+WATERFALL_VERSION = "wf-v1"
+
+
 # --------------------------------------------------------------------------- effective config
 def _access_flat(prof: dict) -> dict:
     """LPV-shaped access keys (flat)."""

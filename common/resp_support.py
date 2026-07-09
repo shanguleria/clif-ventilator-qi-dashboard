@@ -107,7 +107,10 @@ def load_clean(data_dir, filetype, timezone, hosp_ids, columns=None, *,
     order of operations (unit-detect BEFORE clip is load-bearing)."""
     from clifpy.tables import RespiratorySupport
 
-    cols = list(columns) if columns is not None else list(DEFAULT_COLUMNS)
+    if columns == "all":
+        cols = None                                    # load every column (the full waterfall needs them)
+    else:
+        cols = list(columns) if columns is not None else list(DEFAULT_COLUMNS)
     filters = {"hospitalization_id": list(hosp_ids)}
     if extra_filters:
         filters.update(extra_filters)
@@ -119,6 +122,48 @@ def load_clean(data_dir, filetype, timezone, hosp_ids, columns=None, *,
     outlier_src = _apply_outliers(rs_tbl)                                      # (2) CLIF-spec clip
     rs = normalize_frame(rs_tbl.df, timezone)                                  # (3)+(4)
     if verbose:
-        print(f"[resp_support.load_clean] rows={len(rs):,} cols={len(cols)} "
+        print(f"[resp_support.load_clean] rows={len(rs):,} cols={len(rs.columns)} "
               f"outliers={outlier_src} fio2={fio2_note}")
     return rs
+
+
+def build_waterfall(data_dir, filetype, timezone, scope_hosp_ids, encounter_mapping, *,
+                    cache_dir, waterfall_version, data_version=None, verbose=True):
+    """LEVEL 1 (proning/sat/sbt): the filled + hourly-scaffold ventilator timeline, built ON TOP of the
+    Level-0 clean. Runs clifpy.process_resp_support_waterfall(load_clean(scope), bfill=False), attaches
+    `encounter_block` from `encounter_mapping`, and caches to
+    `cache_dir/resp_waterfall__<key>.parquet` keyed on (scope, waterfall_version, data_version). The
+    scope-keyed filename means a narrow-scope build can never be silently reused for a wider-scope need
+    (the failure mode of the old fixed per-metric path). Returns the waterfall DataFrame.
+
+    NOTE: cleaning is done PRE-waterfall inside load_clean; there is no post-waterfall normalize step.
+    """
+    import hashlib
+    from pathlib import Path
+    import clifpy
+
+    cache_dir = Path(cache_dir); cache_dir.mkdir(parents=True, exist_ok=True)
+    scope = sorted({str(h) for h in scope_hosp_ids})
+    key_src = "\n".join(scope) + f"::wf={waterfall_version}::data={data_version or ''}"
+    key = hashlib.sha1(key_src.encode()).hexdigest()[:16]
+    cache_path = cache_dir / f"resp_waterfall__{key}.parquet"
+
+    if cache_path.exists():
+        if verbose:
+            print(f"[resp_support.build_waterfall] cache hit {cache_path.name} "
+                  f"(scope={len(scope)} hosps)")
+        return pd.read_parquet(cache_path)
+
+    rs = load_clean(data_dir, filetype, timezone, scope, columns="all", verbose=verbose)
+    wf = clifpy.process_resp_support_waterfall(
+        rs, id_col="hospitalization_id", bfill=False, verbose=verbose,
+    )
+    wf["hospitalization_id"] = wf["hospitalization_id"].astype(str)
+    em = encounter_mapping[["hospitalization_id", "encounter_block"]].copy()
+    em["hospitalization_id"] = em["hospitalization_id"].astype(str)
+    wf = wf.merge(em, on="hospitalization_id", how="left")
+    wf.to_parquet(cache_path, index=False)
+    if verbose:
+        print(f"[resp_support.build_waterfall] built {len(wf):,} rows "
+              f"(scope={len(scope)} hosps) -> {cache_path.name}")
+    return wf
