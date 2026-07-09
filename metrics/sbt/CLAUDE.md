@@ -121,12 +121,14 @@ federation summary row (`sbt_delivered_legacy`).
   only hourly → delivery is a **lower bound**. `pct_native` (share of support readings from native vs
   scaffold rows) is surfaced as a coverage diagnostic.
 - **CPAP pressure** is read from `peep_set` — CLIF `respiratory_support` has no dedicated CPAP column.
-- **Cohort scope (resolved 2026-06-04):** SBT now builds its **own** full ICU∩IMV respiratory_support
-  waterfall (`cohort.seed_cache_from: null`) over all 41,179 ICU encounter-blocks — it no longer reuses the
-  SAT vertical's SAT-sedation-scoped cache, which silently dropped never-sedated ventilated-ICU patients.
-  The complete cohort is **110,898 vent-ICU days / 18,060 blocks / 16,504 patients** (was 105,665 days under
-  the seeded cache). Those added patients matter most to the liberal `on_spontaneous` view and the
-  all-vent-days denominator. Rebuild cost ~35–45 min (`python code/01_build_cohort.py`, empty `_cache/`).
+- **Cohort scope (resolved 2026-06-04; substrate shared 2026-07):** SBT builds its **own** full ICU∩IMV
+  respiratory_support waterfall over all 41,179 ICU encounter-blocks via the shared
+  `common.resp_support.build_waterfall` substrate — it does not reuse the SAT vertical's
+  SAT-sedation-scoped cache, which silently dropped never-sedated ventilated-ICU patients. The complete
+  cohort is **110,910 vent-ICU days / 18,060 blocks / 16,504 patients** (was 105,665 days under the old
+  seeded cache). Those added patients matter most to the liberal `on_spontaneous` view and the
+  all-vent-days denominator. The build is cached in `_cache/resp_waterfall.parquet` with a
+  `.version` sidecar that auto-rebuilds on a `WATERFALL_VERSION` bump; rebuild cost ~35–45 min.
 
 ### Unit & time-period slicing (dashboard filters)
 - **Unit** = ICU `location_type` of the patient-day (attached per day in 01).
@@ -146,14 +148,14 @@ code/
   sbt_vasopressors.py       # UTIL: norepinephrine-equivalent step-function engine
   sbt_detect.py             # UTIL: controlled-hour accrual, stability screen, trach flag, transitions
   00_probe_documentation.py # quantify-first coverage probe (aggregates only; run on demand)
-  01_build_cohort.py        # ventilated-ICU patient-DAYS (reuses SAT's warm waterfall cache)
+  01_build_cohort.py        # ventilated-ICU patient-DAYS (own full ICU∩IMV waterfall via common.resp_support)
   02_sbt_eligibility.py     # >=12h controlled + >=2h stable + non-trach + non-paralytic -> eligible/...
   03_sbt_observation.py     # 3 numerators + per-episode durations + per-day spont-minutes
   04_metrics.py             # rates + unit/period slices + site summary + tile feed
   05_dashboard.py           # interactive maroon/cream HTML dashboard (toggles, decomp, duration panel)
 output/
   intermediate/
-    _cache/                 # checkpoints (own full ICU∩IMV waterfall; seed_cache_from=null)
+    _cache/                 # checkpoints (own full ICU∩IMV waterfall via common.resp_support.build_waterfall + .version sidecar)
     cohort.parquet          # ventilated-ICU patient-days
     sbt_eligibility.parquet
     sbt_observation.parquet
@@ -194,14 +196,15 @@ The pipeline is **config-driven** — no hard-coded paths. Other sites copy `con
 
 ## Reuse
 
-- **Cohort / loader / waterfall machinery** is adapted from the sibling **SAT** vertical
+- **Cohort / loader / stitching machinery** is adapted from the sibling **SAT** vertical
   (`../sat/code/01_build_cohort.py`): `build_orchestrator`, `_coerce_dttm`, `stitch_cached`,
   `waterfall_cached` + `_normalize_waterfall`, `build_imv_intervals`/`build_icu_intervals`/
   `intersect_imv_icu`/`expand_to_days`/`attach_demographics`. The cohort is the same vent-ICU
-  patient-day **universe** as SAT, but SBT builds its **own** full ICU∩IMV waterfall
-  (`cohort.seed_cache_from: null`) rather than seeding from SAT's sedation-scoped cache — see the
-  Cohort-scope caveat above. `seed_cache_from` can still point at a sibling `_cache/` to skip the
-  ~35-min waterfall if that scope caveat is acceptable.
+  patient-day **universe** as SAT, but SBT builds its **own** full ICU∩IMV waterfall over all ICU∩IMV
+  blocks (rather than SAT's sedation-scoped cache — see the Cohort-scope caveat above). Both verticals'
+  `waterfall_cached` now delegates to the shared `common.resp_support.build_waterfall`; the scope
+  (ICU∩IMV for SBT vs ICU∩sedation for SAT) is what differs, so each keeps its own scope-appropriate
+  cache.
 - **SpO2 load + merge_asof backward** pattern from `../lpv/code/02d_severity.py`.
 - **Vasopressor unit/weight standardization** from clifpy `unit_converter.standardize_dose_to_base_units`.
 - **Metrics / slice / tile-feed machinery** adapted from `../sat/code/04_metrics.py`
@@ -218,7 +221,9 @@ python code/00_probe_documentation.py    # coverage probe (run first, on demand)
 python code/01_build_cohort.py           # --refresh / --refresh-waterfall available
 ```
 
-The waterfall step is checkpointed in `output/intermediate/_cache/` (seeded from SAT on first run).
+The waterfall step is checkpointed in `output/intermediate/_cache/resp_waterfall.parquet` (built via
+the shared `common.resp_support.build_waterfall`; a `.version` sidecar auto-rebuilds it on a
+`WATERFALL_VERSION` bump).
 
 ---
 

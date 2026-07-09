@@ -9,10 +9,7 @@
     "vitals"
   ],
 
-  "_comment_cohort": "SBT = ventilated-ICU patient-days (IMV ∩ ICU, day-expanded). seed_cache_from is null: SBT builds its OWN full ICU∩IMV respiratory_support waterfall from scratch (~35-min) rather than reusing the SAT vertical's warm cache. The SAT cache was scoped to ICU ∩ SAT-sedation hospitalizations and silently dropped never-sedated ventilated-ICU patients — exactly the population the liberal 'all IMV' denominator + 'on spontaneous mode at all' numerator need. Set to a sibling _cache path only if you accept that scope caveat.",
-  "cohort": {
-    "seed_cache_from": null
-  },
+  "_comment_cohort": "SBT = ventilated-ICU patient-days (IMV ∩ ICU, day-expanded). SBT builds its OWN full ICU∩IMV respiratory_support waterfall over all ICU∩IMV blocks — including never-sedated patients, exactly the population the liberal 'all IMV' denominator + 'on spontaneous mode at all' numerator need — via the shared common.resp_support.build_waterfall substrate (it does NOT reuse the SAT vertical's SAT-sedation-scoped cache). The ~35-min build is cached with a WATERFALL_VERSION sidecar and rebuilds automatically when that version bumps; no seeding knob.",
 
   "_comment_sbt_modes": "CLIF 2.1.0 respiratory_support mode_category permissible values (lowercased by the clifpy waterfall). CONTROLLED ventilation = device imv + a controlled mode; SUPPORT (the SBT target) = pressure support/cpap. Confirm against your site's charted mode_category strings.",
   "sbt_modes": {

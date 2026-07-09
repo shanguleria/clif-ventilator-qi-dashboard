@@ -16,9 +16,9 @@ breathing-trial half of the ABCDE liberation bundle and the natural pair to SAT.
 
 ## 3. Unit of analysis
 One **calendar day (US/Central)** on which an `encounter_block` is on IMV and in an ICU location — the
-same universe as SAT. SBT builds its **own** full ICU∩IMV respiratory-support waterfall
-(`cohort.seed_cache_from: null`) rather than reusing SAT's sedation-scoped cache, so never-sedated
-ventilated patients are included.
+same universe as SAT. SBT builds its **own** full ICU∩IMV respiratory-support waterfall via the
+shared `common.resp_support.build_waterfall` substrate rather than reusing SAT's sedation-scoped
+cache, so never-sedated ventilated patients are included.
 
 ## 4. Denominator, numerator, and the exclusion-toggle model
 The dashboard presents **one** SBT rate under a **broadest-by-default** model with eight fixed-effect
@@ -134,7 +134,7 @@ changes.
 
 **Config documentation strings** (verbatim):
 
-> **_comment_cohort** — SBT = ventilated-ICU patient-days (IMV ∩ ICU, day-expanded). seed_cache_from is null: SBT builds its OWN full ICU∩IMV respiratory_support waterfall from scratch (~35-min) rather than reusing the SAT vertical's warm cache. The SAT cache was scoped to ICU ∩ SAT-sedation hospitalizations and silently dropped never-sedated ventilated-ICU patients — exactly the population the liberal 'all IMV' denominator + 'on spontaneous mode at all' numerator need. Set to a sibling _cache path only if you accept that scope caveat.
+> **_comment_cohort** — SBT = ventilated-ICU patient-days (IMV ∩ ICU, day-expanded). SBT builds its OWN full ICU∩IMV respiratory_support waterfall over all ICU∩IMV blocks — including never-sedated patients, exactly the population the liberal 'all IMV' denominator + 'on spontaneous mode at all' numerator need — via the shared common.resp_support.build_waterfall substrate (it does NOT reuse the SAT vertical's SAT-sedation-scoped cache). The ~35-min build is cached with a WATERFALL_VERSION sidecar and rebuilds automatically when that version bumps; no seeding knob.
 
 > **_comment_sbt_modes** — CLIF 2.1.0 respiratory_support mode_category permissible values (lowercased by the clifpy waterfall). CONTROLLED ventilation = device imv + a controlled mode; SUPPORT (the SBT target) = pressure support/cpap. Confirm against your site's charted mode_category strings.
 
