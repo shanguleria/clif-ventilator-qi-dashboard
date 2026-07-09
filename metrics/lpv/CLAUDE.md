@@ -78,10 +78,14 @@ the dashboard's "By unit & over time" tab and on the bundle scorecard:
   splits (→ `N09S` + `N09N`); other sites may fan out further.
 
 **How it threads through the pipeline:**
-- `01_cohort.py` assigns `assigned_unit` (type, by most-IMV-rows/day — *unchanged*) and, nested
-  *within* that chosen type, `assigned_unit_name` (the specific unit). Deriving the name inside the
-  already-chosen type guarantees every name rolls up to exactly one type and keeps type-level numbers
-  byte-identical (a hard cross-check asserts the nesting).
+- `01_cohort.py` assigns `assigned_unit` (type) and `assigned_unit_name` (specific unit) as the
+  location of the **earliest IMV-in-ICU row that calendar day** — the **start-of-day** unit (both come
+  from that one row, so every name rolls up to exactly one type; a hard cross-check asserts the
+  nesting). This matches the start-of-day rule used by sat/sbt and proning's single-instant
+  attribution, so all four tiles label a patient-day's ICU the same way (see `docs/determinism.md`).
+  Changed 2026-07-09 from the prior "most-IMV-rows/day (alphabetical tie-break)" pick — that was already
+  deterministic but a *different* rule than the other tiles; the switch redistributes per-unit cells
+  but leaves site-wide totals unchanged.
 - `02_features.py` carries `assigned_unit_name` as a passthrough id column.
 - `03_aggregate.py` emits the daily/monthly/weekly summaries + Vt grid for **both** dims, tagged with
   a `dim` column (`type` | `name`); the name dim has per-unit rows only (no `__ALL__` — the shared

@@ -142,8 +142,16 @@ rs = load_clean(
         "plateau_pressure_obs", "peep_obs", "peep_set", "fio2_set",
     ],
 )
+# DETERMINISM: the time-limited ffill (Step A) and the shift(-1) interval construction (Step B) both
+# depend on row order within (hospitalization_id, recorded_dttm); two respiratory_support rows charted
+# at the same instant with different settings would otherwise let input order decide which value carries
+# forward / which settings define the interval piece. Add content tie-breaks (kind="stable") so the
+# order — and every downstream adherence number — is reproducible regardless of how the rows arrived.
+_tb = [c for c in ["device_category", "mode_category", "tidal_volume_obs", "tidal_volume_set",
+                   "plateau_pressure_obs", "peep_obs", "peep_set", "fio2_set", "tracheostomy"]
+       if c in rs.columns]
 rs = rs.dropna(subset=["recorded_dttm"]).sort_values(
-    ["hospitalization_id", "recorded_dttm"]).reset_index(drop=True)
+    ["hospitalization_id", "recorded_dttm"] + _tb, na_position="last", kind="stable").reset_index(drop=True)
 print(f"  respiratory_support rows: {len(rs):,}")
 
 # ----------------------------------------------------------------------------
@@ -289,6 +297,12 @@ iv = iv.rename(columns={"plateau_eff": "plateau", "peep_eff": "peep", "fio2_eff"
 # Nullable component values already encode presence: vt_per_pbw is null iff Vt or PBW
 # absent; plateau null iff plateau absent; driving_pressure null iff plateau or PEEP absent.
 iv = iv.merge(unit_map, on=key, how="inner")
+# DETERMINISM: multiple interval-pieces exist per (hosp, day) with no unique key; sort on the full
+# value tuple so 02_intervals.parquet is byte-stable across runs. (03/05 only do additive groupby-sum
+# on it, so the numbers are already order-invariant — this pins the on-disk layout too.)
+_ivsort = key + [c for c in ["duration_min", "vt_per_pbw", "plateau", "driving_pressure", "peep", "fio2"]
+                 if c in iv.columns]
+iv = iv.sort_values(_ivsort, na_position="last", kind="stable").reset_index(drop=True)
 iv_path = OUT_DIR / "02_intervals.parquet"
 iv.to_parquet(iv_path, index=False)
 print(f"  wrote {iv_path}  ({len(iv):,} rows)")
