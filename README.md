@@ -225,6 +225,18 @@ Then re-collect: `./refresh_scorecard.sh --site <site>` (or `.\refresh_scorecard
 a fast scorecard + methods + `output_to_share` rebuild with **no CLIF re-read**. Full onboarding walkthrough
 (including vocabulary confirmation) in [Onboarding a new site](#onboarding-a-new-site).
 
+**Iterate on dashboard layout/style (no data rebuild):** `rebuild_dashboards.sh` re-renders **every**
+metric dashboard (LPV + proning + sat + sbt) *and* the scorecard from the already-built parquets — no
+CLIF re-read, no waterfall, ~20 s on the UChicago cache. Use it whenever you change dashboard HTML/CSS/JS
+and just want to see the new layout on existing numbers. (`refresh_scorecard.sh` above only re-renders the
+*scorecard* from tile feeds; this also re-renders the per-metric drill-downs.) A metric whose cached inputs
+are absent is skipped with a note; one whose inputs exist runs under `set -e`, so a rendering bug you just
+introduced aborts loudly instead of being silently skipped.
+
+```bash
+./rebuild_dashboards.sh --site <site>    # macOS/Linux   (Windows: .\rebuild_dashboards.ps1 -Site <site>)
+```
+
 ---
 
 ## Pipeline steps
@@ -260,6 +272,7 @@ requirements.txt        # one shared venv for the whole bundle
 run_site.sh / .ps1          # FULL timed build of all 4 metrics (wraps run_bundle + verticals + refresh); logs run_timings.csv
 run_bundle.sh / .ps1        # LPV pipeline + scorecard + methods + output_to_share (phase 1 of run_site)
 refresh_scorecard.sh / .ps1 # fast scorecard-only rebuild (no CLIF re-read)
+rebuild_dashboards.sh / .ps1 # re-render all metric dashboards + scorecard from cached data (layout/style iteration; no CLIF re-read)
 contract/               # the tile-feed spec + JSON Schema (the only thing the scorecard depends on)
 docs/                   # living methods/data-dictionary (build_methods.py + index + scorecard doc + portability report)
 metrics/                # one folder per QI vertical (see metrics/README.md)

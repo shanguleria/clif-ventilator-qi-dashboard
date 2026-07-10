@@ -515,13 +515,15 @@ h2{font-size:19px;font-weight:700;color:var(--maroon-d);border-bottom:1px solid 
 padding-bottom:8px;margin:0 0 18px;}
 h3{font-size:15px;font-weight:600;margin:0 0 6px;color:var(--ink);}
 .sub{color:var(--muted);font-size:13px;margin:0;}
-.slider-bar{display:flex;align-items:center;gap:16px;margin-top:14px;padding:12px 16px;
+.slider-bar{display:flex;align-items:center;flex-wrap:wrap;gap:16px;margin-top:14px;padding:12px 16px;
 background:var(--cream);border:1px solid var(--line);border-radius:10px;}
 .slider-bar label{font-weight:700;color:var(--maroon);font-size:14px;white-space:nowrap;}
 .slider-bar input[type=range]{flex:1;accent-color:var(--maroon);max-width:480px;}
 .slider-bar .val{font-variant-numeric:tabular-nums;font-weight:800;font-size:18px;
 color:var(--maroon-d);min-width:64px;}
-.slider-bar .hint{color:var(--muted);font-size:12px;}
+/* Fixed-threshold note — full-width row beneath the controls; wraps on multiple lines to save space. */
+.fixed-note{flex-basis:100%;color:var(--muted);font-size:12.5px;line-height:1.5;
+border-top:1px solid var(--line);margin-top:2px;padding-top:10px;}
 .slider-bar select{padding:7px 11px;border:1px solid var(--line);border-radius:7px;font-size:14px;
 background:var(--card);color:var(--ink);font-weight:600;cursor:pointer;}
 .slider-bar select:disabled{opacity:.5;}
@@ -575,7 +577,7 @@ const baseLayout = extra => Object.assign({font:FONT, margin:{l:54,r:18,t:28,b:4
   yaxis:{tickformat:".0%", rangemode:"tozero", gridcolor:"#ece1d9"},
   xaxis:{gridcolor:"#f6efe9"}, legend:{font:{size:11}}}, extra||{});
 const CFG = {displayModeBar:false, responsive:true};
-let state = {cutoff:P.params.vt_default, trendMeasure:"vt", year:"all", month:"all", week:"all", severity:"all", unitDim:"type"};
+let state = {cutoff:P.params.vt_default, trendMeasure:"vt", year:"all", month:"all", week:"all", severity:"all", unit:"__ALL__", unitDim:"type"};
 let active = "p-vt";
 function sevList(){ return state.severity==="all" ? P.severity_strata : [state.severity]; }
 // "Group ICUs by" dimension for the by-unit tab: location_type (default) vs specific unit (location_name).
@@ -669,13 +671,16 @@ function dailySeries(measure, dayKeys){
 // allOnly = just the combined "All ICUs" line (used by the Vt headline tab).
 function dayPlus(s){ const d=new Date(s+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()+1); return d.toISOString().slice(0,10); }
 function buildTrend(measure, allOnly){
-  if(isWeek()){
+  const u = state.unit, perUnit = (u !== "__ALL__");
+  // Daily zoom (single month / week) is SITE-WIDE only — per-unit daily counts aren't in the payload,
+  // so when a specific ICU is selected we stay on the monthly per-unit line (zoomed to the year).
+  if(isWeek() && !perUnit){
     const dk=(WEEKDAYS[state.week]||[]).map(i=>P.days[i]);
     return {traces:[{x:dk, y:dailySeries(measure,dk), name:"All ICUs (daily)", mode:"lines+markers",
                      line:{color:"#6f1622",width:2}, marker:{size:6,color:"#8a1f2b"}, connectgaps:false}],
             xrange: dk.length?[dk[0], dayPlus(dk[dk.length-1])]:null, daily:true};
   }
-  if(isMonth()){
+  if(isMonth() && !perUnit){
     const mk=state.year+"-"+state.month;
     const dk=P.days.filter(d=>d.slice(0,7)===mk);
     return {traces:[{x:dk, y:dailySeries(measure,dk), name:"All ICUs (daily)", mode:"lines+markers",
@@ -683,10 +688,11 @@ function buildTrend(measure, allOnly){
             xrange:[mk+"-01", monthAfter(mk)], daily:true};
   }
   const traces = allOnly
-    ? [{x:P.months, y:trendSeries(measure,"__ALL__"), name:"All ICUs", mode:"lines",
-        line:{color:COLORS["__ALL__"],width:2.5}, connectgaps:false}]
+    ? [{x:P.months, y:trendSeries(measure,u), name:(P.unit_label[u]||u), mode:"lines",
+        line:{color:uColor(u),width:2.5}, connectgaps:false}]
     : unitTraces(measure);
-  const xrange = isYear() ? [state.year+"-01-01", monthAfter(state.year+"-12")] : null;
+  // Zoom to the selected year whenever one is picked (covers year, and per-unit month/week).
+  const xrange = (state.year!=="all") ? [state.year+"-01-01", monthAfter(state.year+"-12")] : null;
   return {traces, xrange, daily:false};
 }
 
@@ -694,7 +700,7 @@ function buildTrend(measure, allOnly){
 function setText(){
   const idxs=periodIdxs();
   document.getElementById('cutoff-readout').textContent = Number(state.cutoff).toFixed(1);
-  const R = m => isWeek() ? mRateW(m,"__ALL__") : mRate(m,"__ALL__",idxs);
+  const R = m => isWeek() ? mRateW(m,state.unit) : mRate(m,state.unit,idxs);
   const vt=R("vt"), comp=R("comp"), plat=R("plat"), dp=R("dp");
   document.getElementById('vt-big').textContent = PCT(vt.ar);
   document.getElementById('vt-pct').textContent = PCT(vt.pct);
@@ -710,7 +716,6 @@ function setText(){
 }
 function setHeaderAndTable(){
   const k=periodKey(), sv=state.severity, lbl=periodLabel();
-  document.getElementById('period-readout').textContent = lbl;
   if(isWeek()){
     const ph=P.wheadline[state.week]||P.cohort_headline;
     document.getElementById('cohort-line').textContent =
@@ -731,13 +736,20 @@ function setHeaderAndTable(){
 
 // ---------- Per-panel draw (panel visible when called) ----------
 function drawVt(){
-  const t=buildTrend("vt", true);   // headline: combined All-ICUs curve only
+  const t=buildTrend("vt", true);   // headline: single line for the selected ICU (All ICUs by default)
   Plotly.react('vt-trend', t.traces, baseLayout({showlegend:false, xaxis:{range:t.xrange, gridcolor:"#f6efe9",
     title:t.daily?{text:"Daily — "+periodLabel(),font:{size:11}}:undefined}}), CFG);
+  const cap=document.getElementById('vt-trend-cap');
+  if(cap){
+    cap.textContent = (state.unit==="__ALL__")
+      ? 'Monthly Vt assessable-adherence, all ICUs combined. (Per-unit lines are on the "By unit & over time" tab.)'
+      : 'Monthly Vt assessable-adherence — '+(P.unit_label[state.unit]||state.unit)
+        +'. (Daily zoom is available for All ICUs; compare units on the "By unit & over time" tab.)';
+  }
 }
 function drawComp(){
   const idxs=periodIdxs(), ms=["vt","plat","dp","comp"];
-  const rs=ms.map(m=> (isWeek()?mRateW(m,"__ALL__"):mRate(m,"__ALL__",idxs)).ar);
+  const rs=ms.map(m=> (isWeek()?mRateW(m,state.unit):mRate(m,state.unit,idxs)).ar);
   Plotly.react('cb-bar', [{x:ms.map(m=>P.measure_label[m]), y:rs, type:"bar",
     marker:{color:["#8a1f2b","#9a8c86","#9a8c86","#8a1f2b"]}, text:rs.map(PCT),
     textposition:"outside", cliponaxis:false}],
@@ -807,6 +819,10 @@ document.getElementById('tr-measure').onchange = e => {
 };
 const grpSel = document.getElementById('tr-groupby');
 if(grpSel){ grpSel.onchange = e => { state.unitDim = e.target.value; if(active==="p-trend") drawTrends(); }; }
+// Top-level ICU-subtype filter: reslices the Tidal-Volume + Component-breakdown numbers (the "By unit
+// & over time" comparison tab and the cohort/Table-1 stay cross-unit, matching the other tiles).
+const unitSel = document.getElementById('sel-unit');
+if(unitSel){ unitSel.onchange = () => { state.unit = unitSel.value; setText(); DRAW[active](); }; }
 const yearSel=document.getElementById('sel-year'), monthSel=document.getElementById('sel-month'),
       weekSel=document.getElementById('sel-week'), sevSel=document.getElementById('sel-severity');
 function populateWeeks(yr){
@@ -851,6 +867,11 @@ hist_divs = "".join(
     for c in ["vt_per_pbw", "plateau", "driving_pressure", "peep", "fio2"]
 )
 unit_opts = "".join(f'<option value="{m}">{html.escape(MEASURE_LABEL[m])}</option>' for m in ["vt", "plat", "dp", "comp"])
+# Top-level ICU-subtype filter (location_type grain) for the Tidal-Volume + Component-breakdown views.
+# "__ALL__" (All ICUs) is the default first option; other options are the ICU types present this site.
+unit_opts_top = "".join(
+    f'<option value="{html.escape(u)}">{html.escape(UNIT_LABEL_FULL.get(u, u))}</option>' for u in units
+)
 # "Group ICUs by" toggle — only meaningful when ≥1 location_type splits into multiple specific units.
 _splits = any(list(name_parent.values()).count(t) > 1 for t in set(name_parent.values()))
 groupby_ctrl = (
@@ -884,15 +905,16 @@ BODY = f"""
     <label>Tidal volume cutoff</label>
     <input type="range" id="vt-slider" min="{VT_GRID[0]}" max="{VT_GRID[-1]}" step="0.5" value="{VT_DEFAULT}">
     <span class="val"><span id="cutoff-readout">{VT_DEFAULT:.1f}</span> mL/kg</span>
-    <span class="hint">Plateau ≤ {PLATEAU_MAX:.0f} &amp; ∆P ≤ {DP_MAX:.0f} fixed</span>
     <span style="flex:1 1 24px"></span>
+    <label>ICU</label>
+    <select id="sel-unit" title="Filter the Tidal Volume and Component-breakdown numbers to one ICU type">{unit_opts_top}</select>
     <label>Severity</label>
     <select id="sel-severity" title="Severe respiratory failure = P/F<300 or S/F<315 (SpO₂≤97%) with PEEP>5">{sev_opts}</select>
     <label>Period</label>
     <select id="sel-year">{year_opts}</select>
     <select id="sel-month">{month_opts}</select>
     <select id="sel-week"><option value="all">All weeks</option></select>
-    <span class="val" style="font-size:13px;min-width:90px">📅 <span id="period-readout">all time</span></span>
+    <div class="fixed-note">Fixed indicators of LPV: Plateau pressure ≤ {PLATEAU_MAX:.0f} cm H₂O, Driving pressure (∆P) ≤ {DP_MAX:.0f} cm H₂O</div>
   </div>
 </header>
 
@@ -912,7 +934,7 @@ BODY = f"""
   </div>
   <p class="fig-caption">Among Vt-assessable patient-days (Vt + PBW present, mode-eligible IMV), the % with ≥80% of assessable time at Vt/kg ≤ the chosen cutoff. Move the slider above.</p>
   <div id="vt-trend" style="height:420px"></div>
-  <p class="fig-caption">Monthly Vt assessable-adherence, all ICUs combined. (Per-unit lines are on the "By unit &amp; over time" tab.)</p>
+  <p class="fig-caption" id="vt-trend-cap">Monthly Vt assessable-adherence, all ICUs combined. (Per-unit lines are on the "By unit &amp; over time" tab.)</p>
 </div></div>
 
 <div id="p-comp" class="panel"><div class="section">
@@ -1015,6 +1037,9 @@ checks = {
     "slider endpoint vt@10 > 0.90": alltime_rate("vt", "10.0") > 0.90,
     "period selectors present": 'id="sel-year"' in text and 'id="sel-month"' in text,
     "severity selector present": 'id="sel-severity"' in text,
+    "ICU-subtype filter present": 'id="sel-unit"' in text,
+    "fixed-indicator note present (under slider)": 'class="fixed-note"' in text and "Fixed indicators of LPV" in text,
+    "calendar readout removed": 'id="period-readout"' not in text,
     "table1 nested by severity×period": (all(s in pl["table1"] for s in ["all"] + pl["severity_strata"])
                                          and "all" in pl["table1"]["all"]
                                          and pl["years"][0] in pl["table1"]["all"]
